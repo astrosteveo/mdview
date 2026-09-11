@@ -157,7 +157,7 @@ func (m *Model) rerender() {
 	m.plain = m.plain[:0]
 	for _, l := range m.rendered.Lines {
 		m.plain = append(m.plain, ansi.Strip(render.Unscale(l.Text)))
-		m.lines = append(m.lines, pad+l.Text)
+		m.lines = append(m.lines, preclear(l.Text)+pad+l.Text)
 	}
 	off := m.vp.YOffset
 	// The viewport only tracks offsets and height; View draws m.lines itself.
@@ -165,6 +165,23 @@ func (m *Model) rerender() {
 	m.vp.SetYOffset(off)
 	if m.cur.query != "" {
 		m.findMatches()
+	}
+}
+
+// preclear returns the erase sequence a row must start with. kitty leaves a
+// scaled block's lower-row cells marked as occupied after ordinary text
+// overwrites its top row, and text drawn into such cells is pushed right
+// past them (then wraps, shifting every later row). Erasing the row first
+// clears those cells; a scaled heading also clears the row its block will
+// extend into. Fillers must not erase: their row belongs to the block above.
+func preclear(text string) string {
+	switch {
+	case render.IsFiller(text):
+		return ""
+	case render.IsScaled(text):
+		return "\x1b[K\x1b[B\x1b[K\x1b[A"
+	default:
+		return "\x1b[K"
 	}
 }
 

@@ -140,6 +140,9 @@ func TestOrphanedFillerIsErased(t *testing.T) {
 	if !render.IsScaled(rows[0]) || !render.IsFiller(rows[1]) {
 		t.Fatalf("expected heading + filler at top, got %q / %q", rows[0], rows[1])
 	}
+	if !strings.HasPrefix(rows[0], "\x1b[K\x1b[B\x1b[K\x1b[A") || !strings.HasPrefix(rows[2], "\x1b[K") {
+		t.Fatalf("rows must pre-erase themselves: %q / %q", rows[0], rows[2])
+	}
 
 	// Scroll one line: the filler is now the first row with no heading above
 	// it, so it must become an empty line rather than a cell-skipping spacer.
