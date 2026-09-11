@@ -39,7 +39,7 @@ live preview beside your editor.
 
 ```
 -w N           content width (0 = terminal width, capped at -max)
--max N         max content width in the pager (default 110; 0 = unlimited)
+-max N         max content width in the pager (default 0 = full terminal width)
 -theme NAME    mocha|dark (default) or latte|light
 -pager MODE    auto|always|never
 -color MODE    auto|always|never

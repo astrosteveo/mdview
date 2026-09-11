@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	marginX     = 2
-	pollEvery   = 500 * time.Millisecond
-	defaultMaxW = 110
+	marginX   = 1 // keeps borders and rules off the terminal edge
+	pollEvery = 500 * time.Millisecond
 )
 
 type keymap struct {

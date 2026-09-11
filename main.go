@@ -21,7 +21,7 @@ import (
 func main() {
 	var (
 		width  = flag.Int("w", 0, "content width (0 = terminal width, capped at -max)")
-		maxW   = flag.Int("max", 110, "maximum content width in the pager (0 = unlimited)")
+		maxW   = flag.Int("max", 0, "maximum content width in the pager (0 = full terminal width)")
 		theme  = flag.String("theme", "mocha", "colour theme: mocha|dark, latte|light")
 		pager  = flag.String("pager", "auto", "use the interactive pager: auto|always|never")
 		color  = flag.String("color", "auto", "colour output: auto|always|never")
