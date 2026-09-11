@@ -22,6 +22,7 @@ type attrs struct {
 	checked                         bool
 	unchecked                       bool
 	fg                              string // explicit foreground (syntax highlighting)
+	href                            string // link destination; makes the span clickable
 }
 
 type span struct {
@@ -33,6 +34,7 @@ type span struct {
 var hardBreak = span{text: "\n"}
 
 func (r *Renderer) styleFor(a attrs) lipgloss.Style {
+	a.href = "" // does not affect styling; keep the cache small
 	if s, ok := r.styleCache[a]; ok {
 		return s
 	}
@@ -79,26 +81,45 @@ func (r *Renderer) styleFor(a attrs) lipgloss.Style {
 	return s
 }
 
-// renderLine turns one wrapped line of spans into a styled string.
-func (r *Renderer) renderLine(line []span) string {
+// renderLine turns one wrapped line of spans into a styled Line, recording
+// the cell range of every span that carries a link.
+func (r *Renderer) renderLine(line []span) Line {
 	var sb strings.Builder
+	var out Line
+	col := 0
 	for _, sp := range line {
 		if sp.text == "" {
 			continue
 		}
-		sb.WriteString(r.styleFor(sp.a).Render(sp.text))
+		w := ansi.StringWidth(sp.text)
+		styled := r.styleFor(sp.a).Render(sp.text)
+		if sp.a.href != "" {
+			out.addLink(col, col+w, sp.a.href)
+			if r.OSC8 && hasScheme(sp.a.href) {
+				styled = "\x1b]8;;" + sp.a.href + "\x1b\\" + styled + "\x1b]8;;\x1b\\"
+			}
+		}
+		sb.WriteString(styled)
+		col += w
 	}
-	return sb.String()
+	out.Text = sb.String()
+	return out
 }
 
 // renderLines wraps spans to width and styles every resulting line.
-func (r *Renderer) renderLines(spans []span, width int) []string {
+func (r *Renderer) renderLines(spans []span, width int) []Line {
 	lines := wrap(spans, width)
-	out := make([]string, len(lines))
+	out := make([]Line, len(lines))
 	for i, l := range lines {
 		out[i] = r.renderLine(l)
 	}
 	return out
+}
+
+func (r *Renderer) plainLine(text string) Line { return Line{Text: text} }
+
+func hasScheme(u string) bool {
+	return strings.Contains(u, "://") || strings.HasPrefix(u, "mailto:")
 }
 
 func lineWidth(line []span) int {

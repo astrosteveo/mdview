@@ -96,3 +96,52 @@ func TestBigHeadings(t *testing.T) {
 		t.Fatalf("H4 should be plain 1x text:\n%q", joined)
 	}
 }
+
+func TestLinkRangesAndAnchors(t *testing.T) {
+	src := "# Intro\n\n> - see [docs](other.md#setup) now\n\n## Intro\n\n[https://x.io](https://x.io)\n"
+	r := New(Mocha())
+	r.OSC8 = true
+	d := r.RenderDoc([]byte(src), 60)
+
+	// "┃ " (2) + "• " (2) + "see " (4) → link "docs" spans cols 8..12.
+	var quoteLine int
+	for i, l := range d.Lines {
+		if strings.Contains(l.Text, "docs") {
+			quoteLine = i
+		}
+	}
+	got, ok := d.LinkAt(quoteLine, 8)
+	if !ok || got.Dest != "other.md#setup" || got.Start != 8 || got.End != 12 {
+		t.Fatalf("link at col 8 = %+v ok=%v; line %q", got, ok, ansi.Strip(d.Lines[quoteLine].Text))
+	}
+	if _, ok := d.LinkAt(quoteLine, 12); ok {
+		t.Fatal("col 12 (the space after the link) should not be a link")
+	}
+	if _, ok := d.LinkAt(quoteLine, 7); ok {
+		t.Fatal("col 7 (before the link) should not be a link")
+	}
+
+	if d.Anchors["intro"] != 0 || d.Anchors["intro-1"] == 0 {
+		t.Fatalf("anchors = %v", d.Anchors)
+	}
+
+	text := d.Text()
+	if !strings.Contains(text, "\x1b]8;;https://x.io\x1b\\") {
+		t.Fatal("absolute URL should carry an OSC 8 hyperlink")
+	}
+	if strings.Contains(text, "\x1b]8;;other.md") {
+		t.Fatal("relative paths must not be emitted as OSC 8")
+	}
+}
+
+func TestSlug(t *testing.T) {
+	for in, want := range map[string]string{
+		"Hello, World!": "hello-world",
+		"  Two  words ": "two--words",
+		"C++ & Go":      "c--go",
+	} {
+		if got := Slug(in); got != want {
+			t.Errorf("Slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

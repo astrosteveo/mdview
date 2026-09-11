@@ -11,13 +11,15 @@ import (
 // table lays out a GFM table with box-drawing borders. Cells are rendered as
 // single styled strings; lipgloss/table handles column sizing and wrapping
 // when the natural width exceeds the available width.
-func (r *Renderer) table(t *east.Table, width int) []string {
+// Links inside tables are not clickable: lipgloss/table decides the final
+// column positions, so their cell ranges are unknown here.
+func (r *Renderer) table(t *east.Table, width int) []Line {
 	var headers []string
 	var rows [][]string
 	var aligns []east.Alignment
 
 	cellText := func(c ast.Node) string {
-		return r.renderLine(trimRight(r.inlines(c)))
+		return r.renderLine(trimRight(r.inlines(c))).Text
 	}
 
 	for row := t.FirstChild(); row != nil; row = row.NextSibling() {
@@ -73,9 +75,9 @@ func (r *Renderer) table(t *east.Table, width int) []string {
 		rendered = build().Width(width).String()
 	}
 
-	lines := strings.Split(rendered, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRight(l, " ")
+	var lines []Line
+	for _, l := range strings.Split(rendered, "\n") {
+		lines = append(lines, r.plainLine(strings.TrimRight(l, " ")))
 	}
 	return lines
 }

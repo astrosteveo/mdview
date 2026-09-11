@@ -1,10 +1,13 @@
 // Package tui is the interactive pager: a viewport over rendered markdown
-// with search, live reload, and a status bar.
+// with search, live reload, clickable links, and a navigation stack.
 package tui
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,14 +24,16 @@ import (
 const (
 	marginX   = 1 // keeps borders and rules off the terminal edge
 	pollEvery = 500 * time.Millisecond
+	closeW    = 3 // width of the " ✕ " button in the header
 )
 
 type keymap struct {
-	Quit, Top, Bottom, Search, Next, Prev, Reload, Cancel, Accept key.Binding
+	Quit, Back, Top, Bottom, Search, Next, Prev, Reload, Cancel, Accept key.Binding
 }
 
 var keys = keymap{
-	Quit:   key.NewBinding(key.WithKeys("q", "esc", "ctrl+c")),
+	Quit:   key.NewBinding(key.WithKeys("q", "ctrl+c")),
+	Back:   key.NewBinding(key.WithKeys("esc", "backspace")),
 	Top:    key.NewBinding(key.WithKeys("g", "home")),
 	Bottom: key.NewBinding(key.WithKeys("G", "end")),
 	Search: key.NewBinding(key.WithKeys("/")),
@@ -41,25 +46,43 @@ var keys = keymap{
 
 type tickMsg time.Time
 
-type Model struct {
+// doc is one document on the navigation stack, with its view state.
+type doc struct {
 	path     string // "" when reading from stdin
 	src      []byte
+	lastMod  time.Time
+	yOffset  int
+	query    string
+	matches  []int
+	matchIdx int
+}
+
+func (d doc) name() string {
+	if d.path == "" {
+		return "stdin"
+	}
+	return filepath.Base(d.path)
+}
+
+type Model struct {
 	renderer *render.Renderer
 	maxWidth int
+	// Open opens a URL or non-markdown file outside the viewer.
+	Open func(target string) error
 
-	vp      viewport.Model
-	ready   bool
-	termW   int
-	termH   int
-	lines   []string // rendered, margin-padded lines
-	plain   []string // ANSI-stripped rendered lines, for search
-	lastMod time.Time
+	cur   doc
+	stack []doc // documents to return to; last is the most recent
+
+	vp       viewport.Model
+	ready    bool
+	termW    int
+	termH    int
+	rendered render.Doc
+	lines    []string // rendered, margin-padded lines
+	plain    []string // ANSI-stripped rendered lines, for search
 
 	search    textinput.Model
 	searching bool
-	query     string
-	matches   []int
-	matchIdx  int
 	notice    string
 }
 
@@ -67,21 +90,32 @@ func New(path string, src []byte, r *render.Renderer, maxWidth int) Model {
 	ti := textinput.New()
 	ti.Prompt = "/"
 	ti.CharLimit = 200
-	m := Model{path: path, src: src, renderer: r, maxWidth: maxWidth, search: ti}
-	if path != "" {
-		if fi, err := os.Stat(path); err == nil {
-			m.lastMod = fi.ModTime()
-		}
+	return Model{
+		renderer: r,
+		maxWidth: maxWidth,
+		Open:     xdgOpen,
+		cur:      newDoc(path, src),
+		search:   ti,
 	}
-	return m
 }
 
-func (m Model) Init() tea.Cmd {
-	if m.path == "" {
-		return nil
+func newDoc(path string, src []byte) doc {
+	d := doc{path: path, src: src}
+	if path != "" {
+		if fi, err := os.Stat(path); err == nil {
+			d.lastMod = fi.ModTime()
+		}
 	}
-	return tick()
+	return d
 }
+
+func xdgOpen(target string) error {
+	cmd := exec.Command("xdg-open", target)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	return cmd.Start()
+}
+
+func (m Model) Init() tea.Cmd { return tick() }
 
 func tick() tea.Cmd {
 	return tea.Tick(pollEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
@@ -95,94 +129,234 @@ func (m Model) contentWidth() int {
 	return max(w, 20)
 }
 
+// headerH is the height of the breadcrumb/close bar, shown only when there
+// is a document to go back to.
+func (m Model) headerH() int {
+	if len(m.stack) > 0 {
+		return 1
+	}
+	return 0
+}
+
+// layout sizes the viewport for the current terminal and chrome.
+func (m *Model) layout() {
+	h := max(m.termH-1-m.headerH(), 1)
+	if !m.ready {
+		m.vp = viewport.New(m.termW, h)
+		m.ready = true
+	} else {
+		m.vp.Width, m.vp.Height = m.termW, h
+	}
+}
+
 // rerender re-renders the source at the current width, preserving scroll.
 func (m *Model) rerender() {
-	rendered := m.renderer.Render(m.src, m.contentWidth())
+	m.rendered = m.renderer.RenderDoc(m.cur.src, m.contentWidth())
 	pad := strings.Repeat(" ", marginX)
-	lines := strings.Split(rendered, "\n")
+	m.lines = m.lines[:0]
 	m.plain = m.plain[:0]
-	for i, l := range lines {
-		m.plain = append(m.plain, ansi.Strip(render.Unscale(l)))
-		lines[i] = pad + l
+	for _, l := range m.rendered.Lines {
+		m.plain = append(m.plain, ansi.Strip(render.Unscale(l.Text)))
+		m.lines = append(m.lines, pad+l.Text)
 	}
-	m.lines = lines
 	off := m.vp.YOffset
 	// The viewport only tracks offsets and height; View draws m.lines itself.
-	m.vp.SetContent(strings.Join(lines, "\n"))
+	m.vp.SetContent(strings.Join(m.lines, "\n"))
 	m.vp.SetYOffset(off)
-	if m.query != "" {
+	if m.cur.query != "" {
 		m.findMatches()
 	}
 }
 
 func (m *Model) reload() bool {
-	if m.path == "" {
+	if m.cur.path == "" {
 		return false
 	}
-	fi, err := os.Stat(m.path)
-	if err != nil || !fi.ModTime().After(m.lastMod) {
+	fi, err := os.Stat(m.cur.path)
+	if err != nil || !fi.ModTime().After(m.cur.lastMod) {
 		return false
 	}
-	data, err := os.ReadFile(m.path)
+	data, err := os.ReadFile(m.cur.path)
 	if err != nil {
 		return false
 	}
-	m.lastMod = fi.ModTime()
-	m.src = data
+	m.cur.lastMod = fi.ModTime()
+	m.cur.src = data
 	m.rerender()
 	m.notice = "reloaded"
 	return true
 }
 
+// --- navigation ---------------------------------------------------------
+
+// follow acts on a link destination: in-document anchors scroll, local
+// markdown files open on the stack, everything else is handed to Open.
+func (m *Model) follow(dest string) {
+	if strings.HasPrefix(dest, "#") {
+		m.jumpAnchor(dest[1:])
+		return
+	}
+	if strings.Contains(dest, "://") || strings.HasPrefix(dest, "mailto:") {
+		if !strings.HasPrefix(dest, "file://") {
+			m.openExternal(dest)
+			return
+		}
+		dest = strings.TrimPrefix(dest, "file://")
+	}
+	path, frag, _ := strings.Cut(dest, "#")
+	if p, err := url.PathUnescape(path); err == nil {
+		path = p
+	}
+	if path == "" {
+		m.jumpAnchor(frag)
+		return
+	}
+	if !filepath.IsAbs(path) && m.cur.path != "" {
+		path = filepath.Join(filepath.Dir(m.cur.path), path)
+	}
+	if isMarkdown(path) {
+		m.push(path, frag)
+		return
+	}
+	m.openExternal(path)
+}
+
+func isMarkdown(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return true
+	}
+	return false
+}
+
+func (m *Model) openExternal(target string) {
+	if m.Open == nil {
+		m.notice = "no opener configured"
+		return
+	}
+	if err := m.Open(target); err != nil {
+		m.notice = fmt.Sprintf("cannot open %s: %v", target, err)
+		return
+	}
+	m.notice = "opened " + target
+}
+
+// push saves the current document and opens path on top of it.
+func (m *Model) push(path, frag string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		m.notice = fmt.Sprintf("cannot open %s: %v", path, err)
+		return
+	}
+	m.cur.yOffset = m.vp.YOffset
+	m.stack = append(m.stack, m.cur)
+	m.cur = newDoc(path, data)
+	m.layout()
+	m.vp.GotoTop()
+	m.rerender()
+	if frag != "" {
+		m.jumpAnchor(frag)
+	}
+}
+
+// pop returns to the previous document at its old scroll position.
+func (m *Model) pop() bool {
+	n := len(m.stack)
+	if n == 0 {
+		return false
+	}
+	m.cur = m.stack[n-1]
+	m.stack = m.stack[:n-1]
+	m.layout()
+	m.rerender()
+	m.vp.SetYOffset(m.cur.yOffset)
+	return true
+}
+
+func (m *Model) jumpAnchor(frag string) {
+	if line, ok := m.rendered.Anchors[frag]; ok {
+		m.vp.SetYOffset(line)
+		return
+	}
+	if line, ok := m.rendered.Anchors[render.Slug(frag)]; ok {
+		m.vp.SetYOffset(line)
+		return
+	}
+	m.notice = "no heading #" + frag
+}
+
+// click resolves a left click at terminal cell (x, y).
+func (m *Model) click(x, y int) tea.Cmd {
+	if m.headerH() > 0 && y == 0 {
+		if x >= m.termW-closeW {
+			m.pop()
+		}
+		return nil
+	}
+	row := y - m.headerH()
+	if row < 0 || row >= m.vp.Height {
+		return nil
+	}
+	if link, ok := m.rendered.LinkAt(m.vp.YOffset+row, x-marginX); ok {
+		m.follow(link.Dest)
+	}
+	return nil
+}
+
+// --- search -------------------------------------------------------------
+
 func (m *Model) findMatches() {
-	m.matches = m.matches[:0]
-	q := strings.ToLower(m.query)
+	m.cur.matches = m.cur.matches[:0]
+	q := strings.ToLower(m.cur.query)
 	for i, l := range m.plain {
 		if strings.Contains(strings.ToLower(l), q) {
-			m.matches = append(m.matches, i)
+			m.cur.matches = append(m.cur.matches, i)
 		}
 	}
 }
 
 func (m *Model) jumpToMatch(delta int) {
-	if len(m.matches) == 0 {
+	n := len(m.cur.matches)
+	if n == 0 {
 		return
 	}
-	m.matchIdx = ((m.matchIdx+delta)%len(m.matches) + len(m.matches)) % len(m.matches)
-	m.vp.SetYOffset(m.matches[m.matchIdx])
+	m.cur.matchIdx = ((m.cur.matchIdx+delta)%n + n) % n
+	m.vp.SetYOffset(m.cur.matches[m.cur.matchIdx])
 }
 
 func (m *Model) startSearchFrom() {
 	// Pick the first match at or below the current top line.
-	m.matchIdx = 0
-	for i, ln := range m.matches {
+	m.cur.matchIdx = 0
+	for i, ln := range m.cur.matches {
 		if ln >= m.vp.YOffset {
-			m.matchIdx = i
+			m.cur.matchIdx = i
 			break
 		}
 	}
-	if len(m.matches) > 0 {
-		m.vp.SetYOffset(m.matches[m.matchIdx])
+	if len(m.cur.matches) > 0 {
+		m.vp.SetYOffset(m.cur.matches[m.cur.matchIdx])
 	}
 }
+
+// --- bubbletea ----------------------------------------------------------
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.termW, m.termH = msg.Width, msg.Height
-		h := max(msg.Height-1, 1)
-		if !m.ready {
-			m.vp = viewport.New(msg.Width, h)
-			m.ready = true
-		} else {
-			m.vp.Width, m.vp.Height = msg.Width, h
-		}
+		m.layout()
 		m.rerender()
 		return m, nil
 
 	case tickMsg:
 		m.reload()
 		return m, tick()
+
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			m.notice = ""
+			return m, m.click(msg.X, msg.Y)
+		}
 
 	case tea.KeyMsg:
 		m.notice = ""
@@ -195,14 +369,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, keys.Accept):
 				m.searching = false
 				m.search.Blur()
-				m.query = strings.TrimSpace(m.search.Value())
-				if m.query == "" {
-					m.matches = nil
+				m.cur.query = strings.TrimSpace(m.search.Value())
+				if m.cur.query == "" {
+					m.cur.matches = nil
 					return m, nil
 				}
 				m.findMatches()
 				m.startSearchFrom()
-				if len(m.matches) == 0 {
+				if len(m.cur.matches) == 0 {
 					m.notice = "no matches"
 				}
 				return m, nil
@@ -215,6 +389,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, keys.Back):
+			if !m.pop() {
+				return m, tea.Quit
+			}
+			return m, nil
 		case key.Matches(msg, keys.Top):
 			m.vp.GotoTop()
 			return m, nil
@@ -232,7 +411,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jumpToMatch(-1)
 			return m, nil
 		case key.Matches(msg, keys.Reload):
-			m.lastMod = time.Time{}
+			m.cur.lastMod = time.Time{}
 			if !m.reload() {
 				m.notice = "nothing to reload"
 			}
@@ -249,6 +428,11 @@ func (m Model) View() string {
 	if !m.ready {
 		return ""
 	}
+	var sb strings.Builder
+	if m.headerH() > 0 {
+		sb.WriteString(m.header())
+		sb.WriteByte('\n')
+	}
 	// Draw visible lines without lipgloss padding: a kitty-scaled heading is
 	// wider than its measured width, and padding would wrap onto the row
 	// below and corrupt the block.
@@ -260,7 +444,32 @@ func (m Model) View() string {
 		// A scaled block on the last row would extend past the screen.
 		visible[n-1] = render.Unscale(visible[n-1])
 	}
-	return strings.Join(visible, "\n") + "\n" + m.statusBar()
+	sb.WriteString(strings.Join(visible, "\n"))
+	sb.WriteByte('\n')
+	sb.WriteString(m.statusBar())
+	return sb.String()
+}
+
+// header draws the breadcrumb trail and the ✕ close button.
+func (m Model) header() string {
+	th := m.renderer.Theme()
+	bar := lipgloss.NewStyle().Background(th.Mantle).Foreground(th.Muted)
+	cur := bar.Foreground(th.Text).Bold(true)
+	closeBtn := lipgloss.NewStyle().Background(th.Quote).Foreground(th.Mantle).Bold(true).Render(" ✕ ")
+
+	var crumbs []string
+	for _, d := range m.stack {
+		crumbs = append(crumbs, bar.Render(d.name()))
+	}
+	crumbs = append(crumbs, cur.Render(m.cur.name()))
+	left := bar.Render(" ") + strings.Join(crumbs, bar.Render(" › "))
+
+	gap := m.termW - lipgloss.Width(left) - closeW
+	if gap < 0 {
+		left = ansi.Truncate(left, m.termW-closeW-1, "…")
+		gap = max(m.termW-lipgloss.Width(left)-closeW, 0)
+	}
+	return left + bar.Render(strings.Repeat(" ", gap)) + closeBtn
 }
 
 func (m Model) statusBar() string {
@@ -275,23 +484,27 @@ func (m Model) statusBar() string {
 		return padBar(left+field, m.termW, bar)
 	}
 
-	title := m.path
+	title := m.cur.path
 	if title == "" {
 		title = "stdin"
 	}
 	left := name.Render(title)
 	if m.notice != "" {
 		left += bar.Render(" " + m.notice)
-	} else if m.query != "" {
-		if len(m.matches) == 0 {
-			left += bar.Render(fmt.Sprintf(" /%s: none", m.query))
+	} else if m.cur.query != "" {
+		if len(m.cur.matches) == 0 {
+			left += bar.Render(fmt.Sprintf(" /%s: none", m.cur.query))
 		} else {
-			left += bar.Render(fmt.Sprintf(" /%s: %d/%d", m.query, m.matchIdx+1, len(m.matches)))
+			left += bar.Render(fmt.Sprintf(" /%s: %d/%d", m.cur.query, m.cur.matchIdx+1, len(m.cur.matches)))
 		}
 	}
 
+	hint := "j/k scroll · / search · n/N next · r reload · q quit"
+	if len(m.stack) > 0 {
+		hint = "esc back · " + hint
+	}
 	pct := fmt.Sprintf(" %3.0f%% ", m.vp.ScrollPercent()*100)
-	right := dim.Render("j/k scroll · / search · n/N next · r reload · q quit") + bar.Bold(true).Render(pct)
+	right := dim.Render(hint) + bar.Bold(true).Render(pct)
 
 	gap := m.termW - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {

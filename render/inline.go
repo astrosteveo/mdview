@@ -44,6 +44,7 @@ func (r *Renderer) walkInline(n ast.Node, cur attrs, out *[]span) {
 		case *ast.Link:
 			a := cur
 			a.link = true
+			a.href = string(v.Destination)
 			start := len(*out)
 			r.walkInline(v, a, out)
 			dest := string(v.Destination)
@@ -55,10 +56,12 @@ func (r *Renderer) walkInline(n ast.Node, cur attrs, out *[]span) {
 		case *ast.AutoLink:
 			a := cur
 			a.link = true
+			a.href = string(v.URL(r.src))
 			*out = append(*out, span{string(v.URL(r.src)), a})
 		case *ast.Image:
 			a := cur
 			a.image = true
+			a.href = string(v.Destination)
 			alt := plainTextOf(v, r.src)
 			if alt == "" {
 				alt = "image"

@@ -13,7 +13,7 @@ import (
 // codeBlock renders a fenced or indented block: an optional language chip on
 // the first line, then syntax-highlighted lines on a padded background.
 // Long lines are hard-wrapped rather than truncated.
-func (r *Renderer) codeBlock(lang, code string, width int) []string {
+func (r *Renderer) codeBlock(lang, code string, width int) []Line {
 	code = strings.ReplaceAll(code, "\t", "    ")
 	const padL, padR = 1, 1
 	inner := width - padL - padR
@@ -27,23 +27,23 @@ func (r *Renderer) codeBlock(lang, code string, width int) []string {
 		return bg.Render(strings.Repeat(" ", padL)) + s + bg.Render(strings.Repeat(" ", max(0, inner-w)+padR))
 	}
 
-	var out []string
+	var out []Line
 	if lang != "" {
 		chip := lipgloss.NewStyle().
 			Foreground(r.th.CodeLabel).
 			Background(r.th.Surface1).
 			Bold(true).
 			Render(" " + lang + " ")
-		out = append(out, fill(chip))
+		out = append(out, r.plainLine(fill(chip)))
 	}
 
 	spans := r.highlight(lang, code)
 	lines := wrapHard(spans, inner)
 	for _, line := range lines {
-		out = append(out, fill(r.renderLine(line)))
+		out = append(out, r.plainLine(fill(r.renderLine(line).Text)))
 	}
 	if lang == "" && len(out) == 0 {
-		out = append(out, fill(""))
+		out = append(out, r.plainLine(fill("")))
 	}
 	return out
 }

@@ -30,10 +30,23 @@ languages), GFM tables with alignment, thematic breaks, raw HTML (dimmed).
 | `/` … `enter`  | search (case-insensitive) |
 | `n`/`N`        | next / previous match |
 | `r`            | reload file           |
-| `q`, `esc`     | quit                  |
+| click a link   | follow it (see below) |
+| `esc`, `backspace`, click `✕` | back to the previous document |
+| `q`            | quit (`esc` also quits at the root) |
 
 The file is polled every 500 ms and re-rendered on change, so it works as a
 live preview beside your editor.
+
+## Links
+
+Left-click any link. A relative or `file://` path to a `.md` file opens in
+place, stacked on the current document — a breadcrumb bar with a `✕`
+appears at the top, and `esc` returns you to where you were. `#heading`
+anchors (GitHub-style slugs) scroll to the heading, including
+`other.md#section`. Anything else — `http(s)`, `mailto:`, images, non-markdown
+files — is handed to `xdg-open`. Absolute URLs are also emitted as OSC 8
+hyperlinks, so kitty's own ctrl+shift+click works too. Links inside tables
+are not clickable (the table layout decides their final position).
 
 ## Flags
 

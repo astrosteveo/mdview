@@ -26,6 +26,8 @@ type Renderer struct {
 	// BigHeadings renders H1–H3 with kitty's text sizing protocol (OSC 66).
 	// Only enable on terminals that support it; see Unscale for the fallback.
 	BigHeadings bool
+	// OSC8 wraps absolute URLs in terminal hyperlinks (OSC 8).
+	OSC8 bool
 
 	th         Theme
 	src        []byte
@@ -46,33 +48,39 @@ var md = goldmark.New(goldmark.WithExtensions(extension.GFM))
 
 // Render renders markdown source to styled text wrapped at width.
 func (r *Renderer) Render(src []byte, width int) string {
+	return r.RenderDoc(src, width).Text()
+}
+
+// RenderDoc renders markdown source to lines with link and anchor metadata.
+func (r *Renderer) RenderDoc(src []byte, width int) Doc {
 	if width < 20 {
 		width = 20
 	}
 	r.src = src
 	r.quoteDepth, r.listDepth, r.skipCheckbox = 0, 0, false
-	doc := md.Parser().Parse(text.NewReader(src))
-	return strings.Join(r.blocks(doc, width, false), "\n")
+	root := md.Parser().Parse(text.NewReader(src))
+	lines := r.blocks(root, width, false)
+	return Doc{Lines: lines, Anchors: collectAnchors(lines)}
 }
 
 // blocks renders each child of parent, separating them with a blank line
 // unless the container is a tight list item.
-func (r *Renderer) blocks(parent ast.Node, width int, tight bool) []string {
-	var out []string
+func (r *Renderer) blocks(parent ast.Node, width int, tight bool) []Line {
+	var out []Line
 	for c := parent.FirstChild(); c != nil; c = c.NextSibling() {
 		lines := r.block(c, width, tight)
 		if len(lines) == 0 {
 			continue
 		}
 		if len(out) > 0 && !tight {
-			out = append(out, "")
+			out = append(out, Line{})
 		}
 		out = append(out, lines...)
 	}
 	return out
 }
 
-func (r *Renderer) block(n ast.Node, width int, tight bool) []string {
+func (r *Renderer) block(n ast.Node, width int, tight bool) []Line {
 	switch v := n.(type) {
 	case *ast.Heading:
 		return r.heading(v, width)
@@ -89,7 +97,7 @@ func (r *Renderer) block(n ast.Node, width int, tight bool) []string {
 	case *ast.HTMLBlock:
 		return r.htmlBlock(v, width)
 	case *ast.ThematicBreak:
-		return []string{r.rule("─", width, r.th.Rule)}
+		return []Line{r.plainLine(r.rule("─", width, r.th.Rule))}
 	case *east.Table:
 		return r.table(v, width)
 	default:
@@ -97,7 +105,7 @@ func (r *Renderer) block(n ast.Node, width int, tight bool) []string {
 	}
 }
 
-func (r *Renderer) heading(h *ast.Heading, width int) []string {
+func (r *Renderer) heading(h *ast.Heading, width int) []Line {
 	level := h.Level
 	if level < 1 {
 		level = 1
@@ -117,28 +125,40 @@ func (r *Renderer) heading(h *ast.Heading, width int) []string {
 	spans := r.inlines(h)
 	// Headings are rendered as plain runs so the heading colour wins, but
 	// inline code inside them keeps its chip.
-	var out []string
+	var out []Line
 	for _, line := range wrap(spans, max(width/sc.s, 1)) {
 		var sb strings.Builder
+		var ln Line
+		col := 0
 		for _, sp := range line {
 			sty := base
 			if sp.a.code {
 				sty = r.styleFor(sp.a)
 			}
+			w := ansi.StringWidth(sp.text)
+			if sp.a.href != "" {
+				ln.addLink(col, col+w, sp.a.href)
+			}
 			sb.WriteString(sc.render(sty, sp.text))
+			col += w
 		}
-		out = append(out, sb.String())
+		ln.Text = sb.String()
+		ln = ln.scaleCols(sc.s)
+		if len(out) == 0 {
+			ln.Anchor = Slug(plainText(spans))
+		}
+		out = append(out, ln)
 		// Rows below a scaled block belong to it; skip past the block and
 		// clear the rest of the row rather than writing over it.
 		for i := 1; i < sc.s; i++ {
-			out = append(out, fmt.Sprintf("\x1b[%dC\x1b[K", lineWidth(line)*sc.s))
+			out = append(out, r.plainLine(fmt.Sprintf("\x1b[%dC\x1b[K", lineWidth(line)*sc.s)))
 		}
 	}
 	switch level {
 	case 1:
-		out = append(out, r.rule("━", width, color))
+		out = append(out, r.plainLine(r.rule("━", width, color)))
 	case 2:
-		out = append(out, r.rule("─", width, r.th.Rule))
+		out = append(out, r.plainLine(r.rule("─", width, r.th.Rule)))
 	}
 	return out
 }
@@ -191,16 +211,16 @@ func (r *Renderer) rule(ch string, width int, color lipgloss.Color) string {
 	return lipgloss.NewStyle().Foreground(color).Render(strings.Repeat(ch, width))
 }
 
-func (r *Renderer) blockquote(q *ast.Blockquote, width int) []string {
+func (r *Renderer) blockquote(q *ast.Blockquote, width int) []Line {
 	r.quoteDepth++
 	inner := r.blocks(q, width-2, false)
 	r.quoteDepth--
 	bar := lipgloss.NewStyle().Foreground(r.th.Quote).Render("┃")
 	for i, l := range inner {
-		if l == "" {
-			inner[i] = bar
+		if l.Text == "" {
+			inner[i] = r.plainLine(bar)
 		} else {
-			inner[i] = bar + " " + l
+			inner[i] = l.prefix(bar+" ", 2)
 		}
 	}
 	return inner
@@ -208,7 +228,7 @@ func (r *Renderer) blockquote(q *ast.Blockquote, width int) []string {
 
 var bullets = []string{"•", "◦", "▪", "▫"}
 
-func (r *Renderer) list(l *ast.List, width int) []string {
+func (r *Renderer) list(l *ast.List, width int) []Line {
 	bulletStyle := lipgloss.NewStyle().Foreground(r.th.Bullet)
 	numStyle := lipgloss.NewStyle().Foreground(r.th.Number)
 
@@ -223,7 +243,7 @@ func (r *Renderer) list(l *ast.List, width int) []string {
 	}
 	hang := markerW
 
-	var out []string
+	var out []Line
 	num := l.Start
 	r.listDepth++
 	for item := l.FirstChild(); item != nil; item = item.NextSibling() {
@@ -247,18 +267,18 @@ func (r *Renderer) list(l *ast.List, width int) []string {
 		lines := r.blocks(item, width-hang, l.IsTight)
 		r.skipCheckbox = false
 		if len(lines) == 0 {
-			lines = []string{""}
+			lines = []Line{{}}
 		}
 		pad := strings.Repeat(" ", hang)
 		for i, ln := range lines {
 			if i == 0 {
-				out = append(out, marker+ln)
+				out = append(out, ln.prefix(marker, hang))
 			} else {
-				out = append(out, pad+ln)
+				out = append(out, ln.prefix(pad, hang))
 			}
 		}
 		if !l.IsTight && item.NextSibling() != nil {
-			out = append(out, "")
+			out = append(out, Line{})
 		}
 	}
 	r.listDepth--
@@ -277,13 +297,13 @@ func (r *Renderer) linesOf(n interface {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (r *Renderer) htmlBlock(h *ast.HTMLBlock, width int) []string {
+func (r *Renderer) htmlBlock(h *ast.HTMLBlock, width int) []Line {
 	raw := r.linesOf(h)
 	if h.HasClosure() {
 		raw += "\n" + string(h.ClosureLine.Value(r.src))
 	}
 	raw = strings.TrimRight(raw, "\n")
-	var out []string
+	var out []Line
 	for _, line := range wrapHard([]span{{raw, attrs{html: true}}}, width) {
 		out = append(out, r.renderLine(line))
 	}

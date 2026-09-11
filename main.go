@@ -56,6 +56,7 @@ func main() {
 
 	r := render.New(th)
 	r.NoURLs = *noURLs
+	r.OSC8 = stdoutTTY || *color == "always"
 	switch *bigH {
 	case "on":
 		r.BigHeadings = true
