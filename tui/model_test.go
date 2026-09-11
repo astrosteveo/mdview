@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -22,14 +23,40 @@ func setup(t *testing.T) (Model, string) {
 		[]byte("# Child\n\n"+strings.Repeat("filler\n\n", 30)+"## Part Two\n\nback via [root](../root.md)\n"), 0o644)
 
 	src, _ := os.ReadFile(root)
-	m := New(root, src, render.New(render.Mocha()), 0)
+	r := render.New(render.Mocha())
+	r.NoURLs = true // as main does for the pager: destinations become tooltips
+	m := New(root, src, r, 0)
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
 	return mm.(Model), dir
 }
 
 func click(m Model, x, y int) Model {
 	mm, _ := m.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	mm, _ = mm.(Model).Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
 	return mm.(Model)
+}
+
+func mouse(m Model, x, y int, action tea.MouseAction, button tea.MouseButton) Model {
+	mm, _ := m.Update(tea.MouseMsg{X: x, Y: y, Action: action, Button: button})
+	return mm.(Model)
+}
+
+func press(m Model, k string) (Model, tea.Cmd) {
+	var msg tea.KeyMsg
+	switch k {
+	case "esc":
+		msg = tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		msg = tea.KeyMsg{Type: tea.KeyEnter}
+	case "tab":
+		msg = tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		msg = tea.KeyMsg{Type: tea.KeyShiftTab}
+	default:
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+	}
+	mm, cmd := m.Update(msg)
+	return mm.(Model), cmd
 }
 
 // colOf finds the terminal column of text on the first visible line containing it.
@@ -150,5 +177,137 @@ func TestOrphanedFillerIsErased(t *testing.T) {
 	rows = strings.Split(m.View(), "\n")
 	if rows[0] != "" {
 		t.Fatalf("orphaned filler not erased: %q", rows[0])
+	}
+}
+
+func TestHoverShowsTooltipAndInlineURLIsGone(t *testing.T) {
+	m, _ := setup(t)
+	if strings.Contains(ansi.Strip(m.View()), "(sub/child.md#part-two)") {
+		t.Fatal("pager should not render destinations inline")
+	}
+	x, y := colOf(t, m, "child")
+	m = mouse(m, x, y, tea.MouseActionMotion, tea.MouseButtonNone)
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "⏎ sub/child.md#part-two") {
+		t.Fatalf("tooltip missing on hover:\n%s", view)
+	}
+	// Leaving the link hides it.
+	m = mouse(m, 0, y+3, tea.MouseActionMotion, tea.MouseButtonNone)
+	if strings.Contains(ansi.Strip(m.View()), "sub/child.md#part-two") {
+		t.Fatal("tooltip should hide when the pointer leaves the link")
+	}
+}
+
+func TestKeyboardLinkFocus(t *testing.T) {
+	m, dir := setup(t)
+	m, _ = press(m, "tab")
+	if m.focus != 0 || !strings.Contains(ansi.Strip(m.View()), "⏎ sub/child.md#part-two") {
+		t.Fatalf("tab should focus the first link and show its tooltip (focus=%d)", m.focus)
+	}
+	m, _ = press(m, "tab")
+	if m.focus != 1 || !strings.Contains(ansi.Strip(m.View()), "↗ https://example.com") {
+		t.Fatalf("second tab should focus the web link (focus=%d)", m.focus)
+	}
+	m, _ = press(m, "shift+tab")
+	if m.focus != 0 {
+		t.Fatalf("shift+tab should go back (focus=%d)", m.focus)
+	}
+	m, _ = press(m, "esc")
+	if m.focus != -1 || len(m.stack) != 0 {
+		t.Fatal("esc should clear focus before popping")
+	}
+	m, _ = press(m, "tab")
+	m, _ = press(m, "enter")
+	if filepath.Base(m.cur.path) != "child.md" || len(m.stack) != 1 {
+		t.Fatalf("enter should follow the focused link: %q", m.cur.path)
+	}
+	_ = dir
+}
+
+func TestDragSelectsAndCopies(t *testing.T) {
+	m, _ := setup(t)
+	var copied string
+	m.Copy = func(s string) error { copied = s; return nil }
+	x, y := colOf(t, m, "Go to")
+	m = mouse(m, x, y, tea.MouseActionPress, tea.MouseButtonLeft)
+	m = mouse(m, x+4, y, tea.MouseActionMotion, tea.MouseButtonLeft)
+	m = mouse(m, x+4, y, tea.MouseActionRelease, tea.MouseButtonLeft)
+	if !m.sel.active || m.selectedText() != "Go to" {
+		t.Fatalf("selection = %q active=%v", m.selectedText(), m.sel.active)
+	}
+	m, _ = press(m, "y")
+	if copied != "Go to" || !strings.Contains(m.notice, "copied") {
+		t.Fatalf("copied=%q notice=%q", copied, m.notice)
+	}
+	// Dragging over a link must not follow it.
+	if len(m.stack) != 0 {
+		t.Fatal("drag should not navigate")
+	}
+	// Selection spanning lines joins with newlines (drag upwards: the
+	// anchor becomes the end). Rows above: heading, rule, blank.
+	m.lastClick = time.Time{} // not a double click
+	m = mouse(m, x, y, tea.MouseActionPress, tea.MouseButtonLeft)
+	m = mouse(m, x+1, y-3, tea.MouseActionMotion, tea.MouseButtonLeft)
+	m = mouse(m, x+1, y-3, tea.MouseActionRelease, tea.MouseButtonLeft)
+	got := m.selectedText()
+	if strings.Count(got, "\n") != 3 || !strings.HasPrefix(got, "oot") || !strings.HasSuffix(got, "\nG") {
+		t.Fatalf("multi-line selection = %q", got)
+	}
+	// Esc clears the selection first, then (second press) pops/quits.
+	m, cmd := press(m, "esc")
+	if m.sel.active || cmd != nil {
+		t.Fatal("first esc should only clear the selection")
+	}
+}
+
+func TestDoubleClickSelectsWord(t *testing.T) {
+	m, _ := setup(t)
+	x, y := colOf(t, m, "Go to")
+	m = click(m, x+1, y) // single click: anchor only
+	m = click(m, x+1, y) // second click within the double-click window
+	if got := m.selectedText(); got != "Go" {
+		t.Fatalf("double click selected %q", got)
+	}
+}
+
+func TestContextMenu(t *testing.T) {
+	m, _ := setup(t)
+	var copied string
+	m.Copy = func(s string) error { copied = s; return nil }
+	x, y := colOf(t, m, "web")
+	m = mouse(m, x, y, tea.MouseActionPress, tea.MouseButtonRight)
+	if m.menu == nil {
+		t.Fatal("right click should open the menu")
+	}
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"Open link", "Copy link address", "Reload", "Quit"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("menu missing %q:\n%s", want, view)
+		}
+	}
+	m, _ = press(m, "j") // → Copy link address
+	m, _ = press(m, "enter")
+	if m.menu != nil || copied != "https://example.com" {
+		t.Fatalf("menu action failed: menu=%v copied=%q", m.menu != nil, copied)
+	}
+
+	// Mouse: open, hover the last item (Quit), click it.
+	m = mouse(m, x, y, tea.MouseActionPress, tea.MouseButtonRight)
+	rows, mx, my := m.menuBox()
+	last := len(m.menu.items) - 1
+	m = mouse(m, mx+2, my+1+last, tea.MouseActionMotion, tea.MouseButtonNone)
+	if m.menu.idx != last {
+		t.Fatalf("hover should select item %d, got %d (%d rows)", last, m.menu.idx, len(rows))
+	}
+	quit, cmd := m.Update(tea.MouseMsg{X: mx + 2, Y: my + 1 + last, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if cmd == nil {
+		t.Fatal("clicking Quit should return tea.Quit")
+	}
+	// Esc closes without acting.
+	mm := quit.(Model)
+	mm = mouse(mm, x, y, tea.MouseActionPress, tea.MouseButtonRight)
+	mm, _ = press(mm, "esc")
+	if mm.menu != nil || len(mm.stack) != 0 {
+		t.Fatal("esc should close the menu only")
 	}
 }

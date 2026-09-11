@@ -25,7 +25,8 @@ func main() {
 		theme  = flag.String("theme", "mocha", "colour theme: mocha|dark, latte|light")
 		pager  = flag.String("pager", "auto", "use the interactive pager: auto|always|never")
 		color  = flag.String("color", "auto", "colour output: auto|always|never")
-		noURLs = flag.Bool("no-urls", false, "hide link and image destinations")
+		noURLs = flag.Bool("no-urls", false, "hide link and image destinations in printed output")
+		inline = flag.Bool("inline-urls", false, "show destinations inline in the pager too (they are tooltips by default)")
 		bigH   = flag.String("big-headings", "auto", "scale H1–H3 with kitty's text sizing protocol: auto|on|off")
 	)
 	flag.Usage = func() {
@@ -101,9 +102,10 @@ func main() {
 	if *width > 0 {
 		maxWidth = *width
 	}
+	r.NoURLs = !*inline // the pager shows destinations as tooltips instead
 	m := tui.New(path, src, r, maxWidth)
 
-	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseCellMotion()}
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseAllMotion()}
 	if path == "" {
 		// stdin held the document; take keystrokes from the controlling tty.
 		tty, err := os.Open("/dev/tty")

@@ -29,6 +29,7 @@ const (
 
 type keymap struct {
 	Quit, Back, Top, Bottom, Search, Next, Prev, Reload, Cancel, Accept key.Binding
+	NextLink, PrevLink, Follow, Copy                                    key.Binding
 }
 
 var keys = keymap{
@@ -42,6 +43,11 @@ var keys = keymap{
 	Reload: key.NewBinding(key.WithKeys("r")),
 	Cancel: key.NewBinding(key.WithKeys("esc", "ctrl+c")),
 	Accept: key.NewBinding(key.WithKeys("enter")),
+
+	NextLink: key.NewBinding(key.WithKeys("tab")),
+	PrevLink: key.NewBinding(key.WithKeys("shift+tab")),
+	Follow:   key.NewBinding(key.WithKeys("enter")),
+	Copy:     key.NewBinding(key.WithKeys("y")),
 }
 
 type tickMsg time.Time
@@ -69,6 +75,8 @@ type Model struct {
 	maxWidth int
 	// Open opens a URL or non-markdown file outside the viewer.
 	Open func(target string) error
+	// Copy puts text on the clipboard; nil means defaultCopy (then OSC 52).
+	Copy func(text string) error
 
 	cur   doc
 	stack []doc // documents to return to; last is the most recent
@@ -84,6 +92,15 @@ type Model struct {
 	search    textinput.Model
 	searching bool
 	notice    string
+
+	links       []linkRef // every link in the document, reading order
+	hover       *linkRef  // link under the mouse pointer
+	focus       int       // keyboard-focused link (index into links), -1 none
+	sel         selection
+	lastClick   time.Time
+	lastClickAt pos
+	menu        *menu
+	osc52       string // one-shot clipboard escape, emitted with the next frame
 }
 
 func New(path string, src []byte, r *render.Renderer, maxWidth int) Model {
@@ -96,6 +113,7 @@ func New(path string, src []byte, r *render.Renderer, maxWidth int) Model {
 		Open:     xdgOpen,
 		cur:      newDoc(path, src),
 		search:   ti,
+		focus:    -1,
 	}
 }
 
@@ -166,6 +184,9 @@ func (m *Model) rerender() {
 	if m.cur.query != "" {
 		m.findMatches()
 	}
+	m.collectLinks()
+	m.clearSelection()
+	m.hover, m.menu = nil, nil
 }
 
 // preclear returns the erase sequence a row must start with. kitty leaves a
@@ -302,24 +323,6 @@ func (m *Model) jumpAnchor(frag string) {
 	m.notice = "no heading #" + frag
 }
 
-// click resolves a left click at terminal cell (x, y).
-func (m *Model) click(x, y int) tea.Cmd {
-	if m.headerH() > 0 && y == 0 {
-		if x >= m.termW-closeW {
-			m.pop()
-		}
-		return nil
-	}
-	row := y - m.headerH()
-	if row < 0 || row >= m.vp.Height {
-		return nil
-	}
-	if link, ok := m.rendered.LinkAt(m.vp.YOffset+row, x-marginX); ok {
-		m.follow(link.Dest)
-	}
-	return nil
-}
-
 // --- search -------------------------------------------------------------
 
 func (m *Model) findMatches() {
@@ -370,13 +373,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tick()
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			m.notice = ""
-			return m, m.click(msg.X, msg.Y)
-		}
+		m.osc52 = ""
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		m.notice = ""
+		m.osc52 = ""
+		if m.menu != nil {
+			mm, cmd, handled := m.handleMenuKey(msg)
+			if handled {
+				return mm, cmd
+			}
+		}
 		if m.searching {
 			switch {
 			case key.Matches(msg, keys.Cancel):
@@ -407,9 +415,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 		case key.Matches(msg, keys.Back):
+			// Esc peels one layer at a time: focus/selection, then the doc.
+			if m.focus >= 0 || m.sel.active || m.hover != nil {
+				m.focus, m.hover = -1, nil
+				m.clearSelection()
+				return m, nil
+			}
 			if !m.pop() {
 				return m, tea.Quit
 			}
+			return m, nil
+		case key.Matches(msg, keys.NextLink):
+			m.focusLink(1)
+			return m, nil
+		case key.Matches(msg, keys.PrevLink):
+			m.focusLink(-1)
+			return m, nil
+		case key.Matches(msg, keys.Follow):
+			if m.focus >= 0 && m.focus < len(m.links) {
+				dest := m.links[m.focus].link.Dest
+				m.focus = -1
+				m.follow(dest)
+			}
+			return m, nil
+		case key.Matches(msg, keys.Copy):
+			m.copyText(m.selectedText())
 			return m, nil
 		case key.Matches(msg, keys.Top):
 			m.vp.GotoTop()
@@ -445,11 +475,6 @@ func (m Model) View() string {
 	if !m.ready {
 		return ""
 	}
-	var sb strings.Builder
-	if m.headerH() > 0 {
-		sb.WriteString(m.header())
-		sb.WriteByte('\n')
-	}
 	// Draw visible lines without lipgloss padding: a kitty-scaled heading is
 	// wider than its measured width, and padding would wrap onto the row
 	// below and corrupt the block.
@@ -470,10 +495,88 @@ func (m Model) View() string {
 			visible[i] = ""
 		}
 	}
-	sb.WriteString(strings.Join(visible, "\n"))
-	sb.WriteByte('\n')
-	sb.WriteString(m.statusBar())
-	return sb.String()
+
+	var rows []string
+	if m.headerH() > 0 {
+		rows = append(rows, m.header())
+	}
+	rows = append(rows, visible...)
+	m.drawSelection(rows)
+	m.drawFocus(rows)
+	rows = append(rows, m.statusBar())
+
+	if ref := m.tooltipTarget(); ref != nil {
+		if box, x, y, ok := m.tooltip(*ref); ok {
+			flatten(rows, y)
+			rows[y] = splice(rows[y], x, box)
+		}
+	}
+	if m.menu != nil {
+		box, x, y := m.menuBox()
+		for i, r := range box {
+			if y+i < len(rows) {
+				flatten(rows, y+i)
+				rows[y+i] = splice(rows[y+i], x, r)
+			}
+		}
+	}
+	if m.osc52 != "" {
+		rows[len(rows)-1] += m.osc52
+	}
+	return strings.Join(rows, "\n")
+}
+
+// tooltipTarget is the link whose destination to show: the focused one,
+// else the hovered one.
+func (m Model) tooltipTarget() *linkRef {
+	if m.focus >= 0 && m.focus < len(m.links) {
+		ref := m.links[m.focus]
+		return &ref
+	}
+	return m.hover
+}
+
+// drawSelection paints the selected cell range onto the visible rows.
+func (m Model) drawSelection(rows []string) {
+	if !m.sel.active {
+		return
+	}
+	th := m.renderer.Theme()
+	sty := lipgloss.NewStyle().Background(th.Accent).Foreground(th.Mantle)
+	a, b := m.sel.ordered()
+	for line := a.line; line <= b.line; line++ {
+		row, ok := m.screenRow(line)
+		if !ok || line >= len(m.plain) {
+			continue
+		}
+		flatten(rows, row)
+		s := m.lineScale(line)
+		from, to := 0, ansi.StringWidth(m.plain[line])
+		if line == a.line {
+			from = a.col / s
+		}
+		if line == b.line {
+			to = min(b.col/s+1, max(to, b.col/s+1))
+		}
+		rows[row] = highlight(rows[row], marginX+from, marginX+to, sty)
+	}
+}
+
+// drawFocus marks the keyboard-focused link.
+func (m Model) drawFocus(rows []string) {
+	if m.focus < 0 || m.focus >= len(m.links) {
+		return
+	}
+	ref := m.links[m.focus]
+	row, ok := m.screenRow(ref.line)
+	if !ok {
+		return
+	}
+	th := m.renderer.Theme()
+	sty := lipgloss.NewStyle().Background(th.Link).Foreground(th.Mantle).Bold(true)
+	s := m.lineScale(ref.line)
+	flatten(rows, row)
+	rows[row] = highlight(rows[row], marginX+ref.link.Start/s, marginX+ref.link.End/s, sty)
 }
 
 // header draws the breadcrumb trail and the ✕ close button.
@@ -525,7 +628,7 @@ func (m Model) statusBar() string {
 		}
 	}
 
-	hint := "j/k scroll · / search · n/N next · r reload · q quit"
+	hint := "j/k scroll · / search · tab links · y copy · right-click menu · q quit"
 	if len(m.stack) > 0 {
 		hint = "esc back · " + hint
 	}

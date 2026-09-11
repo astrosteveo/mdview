@@ -30,17 +30,26 @@ languages), GFM tables with alignment, thematic breaks, raw HTML (dimmed).
 | `/` … `enter`  | search (case-insensitive) |
 | `n`/`N`        | next / previous match |
 | `r`            | reload file           |
-| click a link   | follow it (see below) |
-| `esc`, `backspace`, click `✕` | back to the previous document |
+| `tab` / `shift+tab` | focus next / previous link (shows its destination) |
+| `enter`        | follow the focused link |
+| `y`            | copy the selection    |
+| `esc`, `backspace`, click `✕` | clear focus/selection, then back to the previous document |
 | `q`            | quit (`esc` also quits at the root) |
+
+Mouse: hover a link for a tooltip with its destination, click to follow it,
+drag to select text (double-click selects a word), right-click for a menu
+(open/copy link, copy selection, back, reload, quit). Copying uses
+`wl-copy`/`xclip`/`xsel`/`pbcopy` when present, otherwise the terminal's
+own clipboard (OSC 52).
 
 The file is polled every 500 ms and re-rendered on change, so it works as a
 live preview beside your editor.
 
 ## Links
 
-Left-click any link. A relative or `file://` path to a `.md` file opens in
-place, stacked on the current document — a breadcrumb bar with a `✕`
+Destinations are not printed inline in the pager; hover or focus a link to
+see them (`-inline-urls` restores the old look). Left-click any link. A
+relative or `file://` path to a `.md` file opens in place, stacked on the current document — a breadcrumb bar with a `✕`
 appears at the top, and `esc` returns you to where you were. `#heading`
 anchors (GitHub-style slugs) scroll to the heading, including
 `other.md#section`. Anything else — `http(s)`, `mailto:`, images, non-markdown
@@ -56,7 +65,8 @@ are not clickable (the table layout decides their final position).
 -theme NAME    mocha|dark (default) or latte|light
 -pager MODE    auto|always|never
 -color MODE    auto|always|never
--no-urls       hide link/image destinations
+-no-urls       hide link/image destinations in printed output
+-inline-urls   show destinations inline in the pager too (default: tooltips)
 -big-headings  auto|on|off — scale H1/H2/H3 to 2x/1.5x/1.25x using kitty's
                text sizing protocol (auto = on when TERM is xterm-kitty)
 ```
