@@ -311,3 +311,36 @@ func TestContextMenu(t *testing.T) {
 		t.Fatal("esc should close the menu only")
 	}
 }
+
+func TestPlainClickLeavesNoSelectionAndHeadingIntact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.md")
+	src := []byte("# Big heading\n\nsome words here\n")
+	os.WriteFile(path, src, 0o644)
+	r := render.New(render.Mocha())
+	r.BigHeadings = true
+	m := New(path, src, r, 0)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+
+	// Click on the lower half of the 2x heading block (row 1).
+	m = click(m, 5, 1)
+	if m.sel.active {
+		t.Fatal("a plain click must not create a selection")
+	}
+	rows := strings.Split(m.View(), "\n")
+	if !render.IsScaled(rows[0]) || !render.IsFiller(rows[1]) {
+		t.Fatalf("heading should stay scaled after a click: %q / %q", rows[0], rows[1])
+	}
+	// A hit on the filler row resolves to the heading line.
+	if p, ok := m.hit(5, 1); !ok || p.line != 0 {
+		t.Fatalf("hit on block's lower row = %+v ok=%v", p, ok)
+	}
+	// Double-clicking the block selects the word on the heading (2x cells → 1x text).
+	m.lastClick = time.Time{}
+	m = click(m, 3, 1)
+	m = click(m, 3, 1)
+	if got := m.selectedText(); got != "Big" {
+		t.Fatalf("double click on heading selected %q", got)
+	}
+}

@@ -83,6 +83,10 @@ func (m Model) hit(x, y int) (p pos, ok bool) {
 		return pos{}, false
 	}
 	line := min(m.vp.YOffset+row, len(m.lines)-1)
+	// The row under a scaled heading is the lower half of its block.
+	if line > 0 && render.IsFiller(m.rendered.Lines[line].Text) && render.IsScaled(m.rendered.Lines[line-1].Text) {
+		line--
+	}
 	return pos{line, max(x-marginX, 0)}, true
 }
 
@@ -387,9 +391,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		now := time.Now()
-		if m.sel.active && !m.sel.dragging && now.Sub(m.lastClick) < doubleClick && m.lastClickAt == p {
-			// Double click: the second press lands on a fresh single click.
-			m.sel.dragging = false
+		if now.Sub(m.lastClick) < doubleClick && m.lastClickAt == p {
+			// Double click: select the word under the pointer.
 			m.selectWord(p)
 			m.lastClick = time.Time{}
 			return m, nil
@@ -411,14 +414,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		// A plain click: follow a link, otherwise just drop any selection.
-		if ref, ok := m.linkAt(m.sel.a); ok {
-			m.clearSelection()
+		anchor := m.sel.a
+		m.clearSelection()
+		if ref, ok := m.linkAt(anchor); ok {
 			m.follow(ref.link.Dest)
-			return m, nil
 		}
-		// Keep the anchor so a second press can become a double click.
-		m.sel.active = true
-		m.sel.b = m.sel.a
 		return m, nil
 
 	case msg.Action == tea.MouseActionMotion:
