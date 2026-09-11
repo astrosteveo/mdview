@@ -440,9 +440,18 @@ func (m Model) View() string {
 	bottom := min(top+m.vp.Height, len(m.lines))
 	visible := make([]string, m.vp.Height)
 	copy(visible, m.lines[top:bottom])
-	if n := bottom - top; n > 0 && n == m.vp.Height {
+	n := bottom - top
+	if n > 0 && n == m.vp.Height {
 		// A scaled block on the last row would extend past the screen.
 		visible[n-1] = render.Unscale(visible[n-1])
+	}
+	for i := 0; i < n; i++ {
+		// A filler only skips cells; if its heading is not the row above in
+		// this frame (scrolled off, or a stale block from the previous
+		// frame), draw an empty line instead so the row is actually erased.
+		if render.IsFiller(visible[i]) && (i == 0 || !render.IsScaled(visible[i-1])) {
+			visible[i] = ""
+		}
 	}
 	sb.WriteString(strings.Join(visible, "\n"))
 	sb.WriteByte('\n')

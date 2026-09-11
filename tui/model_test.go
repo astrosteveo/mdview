@@ -124,3 +124,28 @@ func TestClickOnPlainTextIsInert(t *testing.T) {
 		t.Fatalf("plain text click changed state: stack=%d notice=%q", len(m.stack), m.notice)
 	}
 }
+
+func TestOrphanedFillerIsErased(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.md")
+	src := []byte("# Big heading\n\n" + strings.Repeat("para\n\n", 20))
+	os.WriteFile(path, src, 0o644)
+	r := render.New(render.Mocha())
+	r.BigHeadings = true
+	m := New(path, src, r, 0)
+	mm, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m = mm.(Model)
+
+	rows := strings.Split(m.View(), "\n")
+	if !render.IsScaled(rows[0]) || !render.IsFiller(rows[1]) {
+		t.Fatalf("expected heading + filler at top, got %q / %q", rows[0], rows[1])
+	}
+
+	// Scroll one line: the filler is now the first row with no heading above
+	// it, so it must become an empty line rather than a cell-skipping spacer.
+	m.vp.SetYOffset(1)
+	rows = strings.Split(m.View(), "\n")
+	if rows[0] != "" {
+		t.Fatalf("orphaned filler not erased: %q", rows[0])
+	}
+}

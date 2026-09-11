@@ -207,6 +207,17 @@ func Unscale(line string) string {
 	return osc66.ReplaceAllString(line, "$1")
 }
 
+// IsScaled reports whether a line draws a kitty-scaled (multi-row) block.
+func IsScaled(line string) bool { return strings.Contains(line, "\x1b]66;") }
+
+var filler = regexp.MustCompile(`^ *\x1b\[\d+C\x1b\[K$`)
+
+// IsFiller reports whether a line is the spacer emitted under a scaled block.
+// It skips the block's cells and clears the rest of the row; it must only be
+// drawn directly beneath its heading — anywhere else it leaves whatever was
+// on that row intact.
+func IsFiller(line string) bool { return filler.MatchString(line) }
+
 func (r *Renderer) rule(ch string, width int, color lipgloss.Color) string {
 	return lipgloss.NewStyle().Foreground(color).Render(strings.Repeat(ch, width))
 }
