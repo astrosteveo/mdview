@@ -44,7 +44,14 @@ live preview beside your editor.
 -pager MODE    auto|always|never
 -color MODE    auto|always|never
 -no-urls       hide link/image destinations
+-big-headings  auto|on|off — scale H1/H2/H3 to 2x/1.5x/1.25x using kitty's
+               text sizing protocol (auto = on when TERM is xterm-kitty)
 ```
+
+Big headings work in kitty ≥ 0.40 only; other terminals get bold, coloured
+1x headings. tmux strips the escape (and the heading text with it), so
+`auto` stays off there — pass `-big-headings on` only on a terminal that
+supports OSC 66.
 
 ## Build
 

@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func TestWrapRespectsWidthAndStyles(t *testing.T) {
@@ -67,5 +69,30 @@ func TestRenderSample(t *testing.T) {
 		if w := ansi.StringWidth(line); w > 60 {
 			t.Errorf("line exceeds width (%d): %q", w, line)
 		}
+	}
+}
+
+func TestBigHeadings(t *testing.T) {
+	lipgloss.SetColorProfile(termenv.TrueColor) // exercise the SGR-prefix path
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	r := New(Mocha())
+	r.BigHeadings = true
+	out := strings.Split(r.Render([]byte("# Title\n\ntext\n\n## Sub `code`\n\n#### Small"), 40), "\n")
+
+	if !strings.Contains(out[0], "m\x1b]66;s=2;Title\x1b\\\x1b[0m") || !strings.HasPrefix(out[0], "\x1b[1;38;2;") {
+		t.Fatalf("H1 not scaled inside its SGR: %q", out[0])
+	}
+	if out[1] != "\x1b[10C\x1b[K" { // skip the 2-row block ("Title" = 5 cells × 2), clear the rest
+		t.Fatalf("H1 filler wrong: %q", out[1])
+	}
+	if Unscale(out[0]) != lipgloss.NewStyle().Foreground(Mocha().Heading[0]).Bold(true).Render("Title") {
+		t.Fatalf("Unscale did not restore 1x line: %q", Unscale(out[0]))
+	}
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "s=2:n=3:d=4:v=1;Sub \x1b\\") || !strings.Contains(joined, "s=2:n=3:d=4:v=1;code\x1b\\") {
+		t.Fatalf("H2 spans not scaled independently:\n%q", joined)
+	}
+	if strings.Contains(joined, "]66;s=1") || !strings.Contains(ansi.Strip(joined), "Small") {
+		t.Fatalf("H4 should be plain 1x text:\n%q", joined)
 	}
 }

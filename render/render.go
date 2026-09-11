@@ -8,6 +8,7 @@ package render
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +23,9 @@ import (
 type Renderer struct {
 	// NoURLs hides link/image destinations after their text.
 	NoURLs bool
+	// BigHeadings renders H1–H3 with kitty's text sizing protocol (OSC 66).
+	// Only enable on terminals that support it; see Unscale for the fallback.
+	BigHeadings bool
 
 	th         Theme
 	src        []byte
@@ -106,20 +110,29 @@ func (r *Renderer) heading(h *ast.Heading, width int) []string {
 	if level >= 5 {
 		base = base.Italic(true)
 	}
+	sc := headingScales[level-1]
+	if !r.BigHeadings {
+		sc = scale{s: 1}
+	}
 	spans := r.inlines(h)
 	// Headings are rendered as plain runs so the heading colour wins, but
 	// inline code inside them keeps its chip.
 	var out []string
-	for _, line := range wrap(spans, width) {
+	for _, line := range wrap(spans, max(width/sc.s, 1)) {
 		var sb strings.Builder
 		for _, sp := range line {
+			sty := base
 			if sp.a.code {
-				sb.WriteString(r.styleFor(sp.a).Render(sp.text))
-			} else {
-				sb.WriteString(base.Render(sp.text))
+				sty = r.styleFor(sp.a)
 			}
+			sb.WriteString(sc.render(sty, sp.text))
 		}
 		out = append(out, sb.String())
+		// Rows below a scaled block belong to it; skip past the block and
+		// clear the rest of the row rather than writing over it.
+		for i := 1; i < sc.s; i++ {
+			out = append(out, fmt.Sprintf("\x1b[%dC\x1b[K", lineWidth(line)*sc.s))
+		}
 	}
 	switch level {
 	case 1:
@@ -128,6 +141,50 @@ func (r *Renderer) heading(h *ast.Heading, width int) []string {
 		out = append(out, r.rule("─", width, r.th.Rule))
 	}
 	return out
+}
+
+// scale is a kitty text-sizing spec: the glyphs occupy an s×s cell block per
+// character, optionally shrunk to n/d of that and aligned vertically by v.
+type scale struct{ s, n, d, v int }
+
+var headingScales = [6]scale{
+	{s: 2},                   // H1: 2x
+	{s: 2, n: 3, d: 4, v: 1}, // H2: 1.5x, bottom-aligned
+	{s: 2, n: 5, d: 8, v: 1}, // H3: 1.25x
+	{s: 1}, {s: 1}, {s: 1},
+}
+
+// render styles text and, for scaled headings, wraps it in OSC 66 so the
+// active SGR attributes apply to the enlarged glyphs.
+func (sc scale) render(sty lipgloss.Style, text string) string {
+	rendered := sty.Render(text)
+	if sc.s <= 1 || text == "" {
+		return rendered
+	}
+	meta := fmt.Sprintf("s=%d", sc.s)
+	if sc.d > 0 {
+		meta += fmt.Sprintf(":n=%d:d=%d:v=%d", sc.n, sc.d, sc.v)
+	}
+	// lipgloss emits <SGR...>text<reset>; keep the SGR prefix, swap the text.
+	i := 0
+	for strings.HasPrefix(rendered[i:], "\x1b[") {
+		j := strings.IndexByte(rendered[i:], 'm')
+		if j < 0 {
+			break
+		}
+		i += j + 1
+	}
+	if !strings.HasPrefix(rendered[i:], text) {
+		return rendered
+	}
+	return rendered[:i] + "\x1b]66;" + meta + ";" + text + "\x1b\\" + rendered[i+len(text):]
+}
+
+var osc66 = regexp.MustCompile(`\x1b\]66;[^;\x1b]*;([^\x1b]*)\x1b\\`)
+
+// Unscale strips kitty text-sizing wrappers, leaving the styled 1x text.
+func Unscale(line string) string {
+	return osc66.ReplaceAllString(line, "$1")
 }
 
 func (r *Renderer) rule(ch string, width int, color lipgloss.Color) string {

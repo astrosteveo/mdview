@@ -51,6 +51,7 @@ type Model struct {
 	ready   bool
 	termW   int
 	termH   int
+	lines   []string // rendered, margin-padded lines
 	plain   []string // ANSI-stripped rendered lines, for search
 	lastMod time.Time
 
@@ -101,10 +102,12 @@ func (m *Model) rerender() {
 	lines := strings.Split(rendered, "\n")
 	m.plain = m.plain[:0]
 	for i, l := range lines {
-		m.plain = append(m.plain, ansi.Strip(l))
+		m.plain = append(m.plain, ansi.Strip(render.Unscale(l)))
 		lines[i] = pad + l
 	}
+	m.lines = lines
 	off := m.vp.YOffset
+	// The viewport only tracks offsets and height; View draws m.lines itself.
 	m.vp.SetContent(strings.Join(lines, "\n"))
 	m.vp.SetYOffset(off)
 	if m.query != "" {
@@ -246,7 +249,18 @@ func (m Model) View() string {
 	if !m.ready {
 		return ""
 	}
-	return m.vp.View() + "\n" + m.statusBar()
+	// Draw visible lines without lipgloss padding: a kitty-scaled heading is
+	// wider than its measured width, and padding would wrap onto the row
+	// below and corrupt the block.
+	top := max(0, m.vp.YOffset)
+	bottom := min(top+m.vp.Height, len(m.lines))
+	visible := make([]string, m.vp.Height)
+	copy(visible, m.lines[top:bottom])
+	if n := bottom - top; n > 0 && n == m.vp.Height {
+		// A scaled block on the last row would extend past the screen.
+		visible[n-1] = render.Unscale(visible[n-1])
+	}
+	return strings.Join(visible, "\n") + "\n" + m.statusBar()
 }
 
 func (m Model) statusBar() string {

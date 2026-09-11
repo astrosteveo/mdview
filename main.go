@@ -26,6 +26,7 @@ func main() {
 		pager  = flag.String("pager", "auto", "use the interactive pager: auto|always|never")
 		color  = flag.String("color", "auto", "colour output: auto|always|never")
 		noURLs = flag.Bool("no-urls", false, "hide link and image destinations")
+		bigH   = flag.String("big-headings", "auto", "scale H1–H3 with kitty's text sizing protocol: auto|on|off")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: mdview [flags] [FILE|-]\n\n")
@@ -51,10 +52,21 @@ func main() {
 
 	path, src := readInput(flag.Arg(0))
 
+	stdoutTTY := term.IsTerminal(int(os.Stdout.Fd()))
+
 	r := render.New(th)
 	r.NoURLs = *noURLs
-
-	stdoutTTY := term.IsTerminal(int(os.Stdout.Fd()))
+	switch *bigH {
+	case "on":
+		r.BigHeadings = true
+	case "off":
+	case "auto":
+		// tmux/screen drop OSC 66 (and the heading text with it), so require
+		// a direct kitty TERM, not just an inherited KITTY_WINDOW_ID.
+		r.BigHeadings = stdoutTTY && strings.HasPrefix(os.Getenv("TERM"), "xterm-kitty")
+	default:
+		fatalf("unknown --big-headings %q", *bigH)
+	}
 	usePager := false
 	switch *pager {
 	case "auto":
