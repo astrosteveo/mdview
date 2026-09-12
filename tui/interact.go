@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"mdview/render"
+	"github.com/astrosteveo/mdview/render"
 )
 
 // Mouse and keyboard interaction beyond scrolling: link hover/focus with

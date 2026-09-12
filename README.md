@@ -4,12 +4,72 @@ Your own damn Markdown viewer. A single Go binary that renders Markdown in
 the terminal — an interactive pager when attached to a TTY, plain styled
 output when piped.
 
+- Syntax-highlighted code blocks, GFM tables, task lists, nested quotes
+- Clickable links: follow `.md` links in place, jump to `#headings`, open URLs in the browser
+- Search, mouse selection with copy, live reload while you edit
+- Catppuccin Mocha and Latte themes; 2x headings on kitty
+- No config files, no daemon, no JavaScript — one static binary
+
 ```
 mdview README.md            # interactive pager
 mdview -theme latte doc.md  # light palette
 cat notes.md | mdview       # stdin (still gets the pager)
 mdview -pager never doc.md  # print and exit
 mdview -color always x.md | less -R
+```
+
+## Install
+
+**Requires Go 1.27 or newer** ([download](https://go.dev/dl/)). No other
+dependencies.
+
+### One-liner
+
+```sh
+go install github.com/astrosteveo/mdview@latest
+```
+
+This drops an `mdview` binary in `$(go env GOPATH)/bin` (usually
+`~/go/bin`). If `mdview` isn't found afterwards, add that directory to your
+`PATH`:
+
+```sh
+# bash: ~/.bashrc    zsh: ~/.zshrc    fish: fish_add_path ~/go/bin
+export PATH="$HOME/go/bin:$PATH"
+```
+
+### From source
+
+```sh
+git clone https://github.com/astrosteveo/mdview.git
+cd mdview
+go build -o mdview .
+sudo install -m 755 mdview /usr/local/bin/   # or: mv mdview ~/.local/bin/
+```
+
+### Check it works
+
+```sh
+mdview -h
+mdview README.md
+```
+
+### Optional extras
+
+- **Clipboard**: `y` and the right-click menu use `wl-copy` (Wayland),
+  `xclip`/`xsel` (X11) or `pbcopy` (macOS) when installed; without them
+  mdview falls back to the terminal's own clipboard (OSC 52), which most
+  modern terminals support.
+- **Opening URLs**: external links are handed to `xdg-open` (Linux) — make
+  sure your desktop has a default browser set.
+- **Big headings**: need [kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.40.
+  Everything else works in any terminal with 256-colour or truecolor support.
+
+### Upgrade / uninstall
+
+```sh
+go install github.com/astrosteveo/mdview@latest   # upgrade
+rm "$(go env GOPATH)/bin/mdview"                   # uninstall
 ```
 
 ## What it renders
@@ -76,12 +136,16 @@ Big headings work in kitty ≥ 0.40 only; other terminals get bold, coloured
 `auto` stays off there — pass `-big-headings on` only on a terminal that
 supports OSC 66.
 
-## Build
+## Development
 
+```sh
+go build -o mdview .   # build
+go test ./...          # run the test suite
+go vet ./...
 ```
-go build -o mdview .
-go test ./...
-```
+
+`testdata/sample.md` exercises every construct the renderer supports —
+`mdview testdata/sample.md` is a quick visual smoke test.
 
 ## How it works
 
@@ -96,3 +160,7 @@ theme's Chroma style. Tables use `lipgloss/table` for column sizing.
 `tui/` is a [Bubble Tea](https://github.com/charmbracelet/bubbletea)
 viewport with a status bar, search over ANSI-stripped lines, and an mtime
 poll for live reload. Themes live in `render/theme.go`.
+
+## License
+
+[MIT](LICENSE)

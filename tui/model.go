@@ -18,7 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"mdview/render"
+	"github.com/astrosteveo/mdview/render"
 )
 
 const (

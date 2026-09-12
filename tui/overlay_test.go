@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"mdview/render"
+	"github.com/astrosteveo/mdview/render"
 )
 
 func TestHighlightKeepsSurroundingStyleAndWidth(t *testing.T) {

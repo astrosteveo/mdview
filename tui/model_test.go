@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"mdview/render"
+	"github.com/astrosteveo/mdview/render"
 )
 
 func setup(t *testing.T) (Model, string) {

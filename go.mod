@@ -1,4 +1,4 @@
-module mdview
+module github.com/astrosteveo/mdview
 
 go 1.27.0
 

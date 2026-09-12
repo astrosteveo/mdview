@@ -14,8 +14,8 @@ import (
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
 
-	"mdview/render"
-	"mdview/tui"
+	"github.com/astrosteveo/mdview/render"
+	"github.com/astrosteveo/mdview/tui"
 )
 
 func main() {

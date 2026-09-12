@@ -6,7 +6,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"mdview/render"
+	"github.com/astrosteveo/mdview/render"
 )
 
 // Row compositing for selections, tooltips and menus. Rows are styled
