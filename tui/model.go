@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/astrosteveo/mdview/graphics"
+	"github.com/astrosteveo/mdview/mermaid"
 	"github.com/astrosteveo/mdview/render"
 )
 
@@ -54,13 +57,15 @@ type tickMsg time.Time
 
 // doc is one document on the navigation stack, with its view state.
 type doc struct {
-	path     string // "" when reading from stdin
-	src      []byte
-	lastMod  time.Time
-	yOffset  int
-	query    string
-	matches  []int
-	matchIdx int
+	path               string // "" when reading from stdin
+	src                []byte
+	lastMod            time.Time
+	yOffset            int
+	baseRow, rowWithin int
+	hasPosition        bool
+	query              string
+	matches            []int
+	matchIdx           int
 }
 
 func (d doc) name() string {
@@ -71,6 +76,12 @@ func (d doc) name() string {
 }
 
 type Model struct {
+	mermaid  *mermaid.Session
+	graphics *graphics.Writer
+	cells    graphics.Capability
+	diagrams map[int]diagram
+	viewer   *diagramView
+
 	renderer *render.Renderer
 	maxWidth int
 	// Open opens a URL or non-markdown file outside the viewer.
@@ -169,15 +180,28 @@ func (m *Model) layout() {
 
 // rerender re-renders the source at the current width, preserving scroll.
 func (m *Model) rerender() {
-	m.rendered = m.renderer.RenderDoc(m.cur.src, m.contentWidth())
+	oldBase, oldWithin := m.documentPosition()
+	oldFocus := ""
+	if m.focus >= 0 && m.focus < len(m.links) {
+		oldFocus = m.links[m.focus].link.Dest
+	}
+	m.rendered = m.diagramLines(m.renderer.RenderDoc(m.cur.src, m.contentWidth()))
 	pad := strings.Repeat(" ", marginX)
 	m.lines = m.lines[:0]
 	m.plain = m.plain[:0]
 	for _, l := range m.rendered.Lines {
-		m.plain = append(m.plain, ansi.Strip(render.Unscale(l.Text)))
+		plain := ansi.Strip(render.Unscale(l.Text))
+		if l.Image {
+			plain = ""
+		} else if l.Mermaid != nil {
+			if _, ok := m.diagrams[l.Mermaid.ID]; ok {
+				plain = l.Mermaid.Source
+			}
+		}
+		m.plain = append(m.plain, plain)
 		m.lines = append(m.lines, preclear(l.Text)+pad+l.Text)
 	}
-	off := m.vp.YOffset
+	off := m.offsetForPosition(oldBase, oldWithin)
 	// The viewport only tracks offsets and height; View draws m.lines itself.
 	m.vp.SetContent(strings.Join(m.lines, "\n"))
 	m.vp.SetYOffset(off)
@@ -185,8 +209,45 @@ func (m *Model) rerender() {
 		m.findMatches()
 	}
 	m.collectLinks()
+	if oldFocus != "" {
+		for i, l := range m.links {
+			if l.link.Dest == oldFocus {
+				m.focus = i
+				break
+			}
+		}
+	}
+	if m.viewer != nil {
+		v := *m.viewer
+		v.focus = m.focus
+		m.viewer = &v
+	}
 	m.clearSelection()
 	m.hover, m.menu = nil, nil
+}
+
+// Positions use original rendered rows rather than image-expanded row numbers.
+// This keeps both asynchronous rendering and breadcrumb restoration anchored.
+func (m Model) documentPosition() (base, within int) {
+	if m.vp.YOffset >= len(m.rendered.Lines) {
+		return m.vp.YOffset, 0
+	}
+	base = m.rendered.Lines[m.vp.YOffset].BaseRow
+	for j := m.vp.YOffset - 1; j >= 0 && m.rendered.Lines[j].BaseRow == base; j-- {
+		within++
+	}
+	return
+}
+func (m Model) offsetForPosition(base, within int) int {
+	for i, l := range m.rendered.Lines {
+		if l.BaseRow >= base {
+			for j := 0; j < within && i+1 < len(m.rendered.Lines) && m.rendered.Lines[i+1].BaseRow == l.BaseRow; j++ {
+				i++
+			}
+			return i
+		}
+	}
+	return m.vp.YOffset
 }
 
 // preclear returns the erase sequence a row must start with. kitty leaves a
@@ -220,6 +281,7 @@ func (m *Model) reload() bool {
 	}
 	m.cur.lastMod = fi.ModTime()
 	m.cur.src = data
+	m.viewer = nil
 	m.rerender()
 	m.notice = "reloaded"
 	return true
@@ -230,6 +292,11 @@ func (m *Model) reload() bool {
 // follow acts on a link destination: in-document anchors scroll, local
 // markdown files open on the stack, everything else is handed to Open.
 func (m *Model) follow(dest string) {
+	if strings.HasPrefix(dest, diagramScheme) {
+		id, _ := strconv.Atoi(strings.TrimPrefix(dest, diagramScheme))
+		m.openDiagram(id)
+		return
+	}
 	if strings.HasPrefix(dest, "#") {
 		m.jumpAnchor(dest[1:])
 		return
@@ -287,6 +354,8 @@ func (m *Model) push(path, frag string) {
 		return
 	}
 	m.cur.yOffset = m.vp.YOffset
+	m.cur.baseRow, m.cur.rowWithin = m.documentPosition()
+	m.cur.hasPosition = true
 	m.stack = append(m.stack, m.cur)
 	m.cur = newDoc(path, data)
 	m.layout()
@@ -299,15 +368,28 @@ func (m *Model) push(path, frag string) {
 
 // pop returns to the previous document at its old scroll position.
 func (m *Model) pop() bool {
-	n := len(m.stack)
-	if n == 0 {
+	return m.restore(len(m.stack) - 1)
+}
+
+// restore selects a history position and discards its forward history.
+func (m *Model) restore(index int) bool {
+	if index < 0 || index >= len(m.stack) {
 		return false
 	}
-	m.cur = m.stack[n-1]
-	m.stack = m.stack[:n-1]
+	m.cur = m.stack[index]
+	m.stack = m.stack[:index]
+	m.searching = false
+	m.search.Blur()
+	m.search.SetValue("")
+	m.lastClick = time.Time{}
+	m.notice, m.osc52 = "", ""
 	m.layout()
 	m.rerender()
-	m.vp.SetYOffset(m.cur.yOffset)
+	if m.cur.hasPosition {
+		m.vp.SetYOffset(m.offsetForPosition(m.cur.baseRow, m.cur.rowWithin))
+	} else {
+		m.vp.SetYOffset(m.cur.yOffset)
+	}
 	return true
 }
 
@@ -328,8 +410,18 @@ func (m *Model) jumpAnchor(frag string) {
 func (m *Model) findMatches() {
 	m.cur.matches = m.cur.matches[:0]
 	q := strings.ToLower(m.cur.query)
-	for i, l := range m.plain {
-		if strings.Contains(strings.ToLower(l), q) {
+	seen := map[int]bool{}
+	for i, text := range m.plain {
+		if i < len(m.rendered.Lines) {
+			if b := m.rendered.Lines[i].Mermaid; b != nil {
+				if !seen[b.ID] && strings.Contains(strings.ToLower(b.Source), q) {
+					m.cur.matches = append(m.cur.matches, i)
+				}
+				seen[b.ID] = true
+				continue
+			}
+		}
+		if strings.Contains(strings.ToLower(text), q) {
 			m.cur.matches = append(m.cur.matches, i)
 		}
 	}
@@ -361,15 +453,39 @@ func (m *Model) startSearchFrom() {
 // --- bubbletea ----------------------------------------------------------
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	if m.viewer != nil {
+		switch msg.(type) {
+		case tea.KeyMsg, tea.MouseMsg:
+			m.osc52 = ""
+			return m.updateViewer(msg)
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.termW, m.termH = msg.Width, msg.Height
+		if m.mermaid != nil {
+			m.cells = graphics.CellSize(m.cells)
+		}
 		m.layout()
+		savedMenu := m.menu
 		m.rerender()
+		m.menu = savedMenu
+		if m.viewer != nil {
+			v := *m.viewer
+			m.viewer = &v
+			m.clampPan()
+		}
 		return m, nil
 
 	case tickMsg:
-		m.reload()
+		if !m.reload() && m.mermaid != nil && m.mermaid.Poll() {
+			savedMenu := m.menu
+			m.rerender()
+			m.menu = savedMenu
+		}
 		return m, tick()
 
 	case tea.MouseMsg:
@@ -434,7 +550,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Follow):
 			if m.focus >= 0 && m.focus < len(m.links) {
 				dest := m.links[m.focus].link.Dest
-				m.focus = -1
+				if !strings.HasPrefix(dest, diagramScheme) {
+					m.focus = -1
+				}
 				m.follow(dest)
 			}
 			return m, nil
@@ -475,6 +593,9 @@ func (m Model) View() string {
 	if !m.ready {
 		return ""
 	}
+	if m.viewer != nil {
+		return m.viewerView()
+	}
 	// Draw visible lines without lipgloss padding: a kitty-scaled heading is
 	// wider than its measured width, and padding would wrap onto the row
 	// below and corrupt the block.
@@ -488,6 +609,12 @@ func (m Model) View() string {
 		visible[n-1] = render.Unscale(visible[n-1])
 	}
 	for i := 0; i < n; i++ {
+		l := m.rendered.Lines[top+i]
+		if l.Image {
+			d := m.diagrams[l.Mermaid.ID]
+			prefix := ansi.Cut(l.Text, 0, l.Indent)
+			visible[i] = "\x1b[K" + strings.Repeat(" ", marginX) + prefix + m.graphics.Row(d.id, d.image, d.cols, d.rows, l.ImageRow, 0, d.cols)
+		}
 		// A filler only skips cells; if its heading is not the row above in
 		// this frame (scrolled off, or a stale block from the previous
 		// frame), draw an empty line instead so the row is actually erased.
@@ -505,7 +632,7 @@ func (m Model) View() string {
 	m.drawFocus(rows)
 	rows = append(rows, m.statusBar())
 
-	if ref := m.tooltipTarget(); ref != nil {
+	if ref := m.tooltipTarget(); ref != nil && !strings.HasPrefix(ref.link.Dest, diagramScheme) {
 		if box, x, y, ok := m.tooltip(*ref); ok {
 			flatten(rows, y)
 			rows[y] = splice(rows[y], x, box)
@@ -545,13 +672,20 @@ func (m Model) drawSelection(rows []string) {
 	sty := lipgloss.NewStyle().Background(th.Accent).Foreground(th.Mantle)
 	a, b := m.sel.ordered()
 	for line := a.line; line <= b.line; line++ {
+		if line >= 0 && line < len(m.rendered.Lines) && m.rendered.Lines[line].Image {
+			continue
+		}
 		row, ok := m.screenRow(line)
 		if !ok || line >= len(m.plain) {
 			continue
 		}
 		flatten(rows, row)
 		s := m.lineScale(line)
-		from, to := 0, ansi.StringWidth(m.plain[line])
+		display := m.plain[line]
+		if line < len(m.rendered.Lines) && m.rendered.Lines[line].Mermaid != nil {
+			display = ansi.Strip(m.rendered.Lines[line].Text)
+		}
+		from, to := 0, ansi.StringWidth(display)
 		if line == a.line {
 			from = a.col / s
 		}
@@ -579,28 +713,6 @@ func (m Model) drawFocus(rows []string) {
 	rows[row] = highlight(rows[row], marginX+ref.link.Start/s, marginX+ref.link.End/s, sty)
 }
 
-// header draws the breadcrumb trail and the ✕ close button.
-func (m Model) header() string {
-	th := m.renderer.Theme()
-	bar := lipgloss.NewStyle().Background(th.Mantle).Foreground(th.Muted)
-	cur := bar.Foreground(th.Text).Bold(true)
-	closeBtn := lipgloss.NewStyle().Background(th.Quote).Foreground(th.Mantle).Bold(true).Render(" ✕ ")
-
-	var crumbs []string
-	for _, d := range m.stack {
-		crumbs = append(crumbs, bar.Render(d.name()))
-	}
-	crumbs = append(crumbs, cur.Render(m.cur.name()))
-	left := bar.Render(" ") + strings.Join(crumbs, bar.Render(" › "))
-
-	gap := m.termW - lipgloss.Width(left) - closeW
-	if gap < 0 {
-		left = ansi.Truncate(left, m.termW-closeW-1, "…")
-		gap = max(m.termW-lipgloss.Width(left)-closeW, 0)
-	}
-	return left + bar.Render(strings.Repeat(" ", gap)) + closeBtn
-}
-
 func (m Model) statusBar() string {
 	th := m.renderer.Theme()
 	bar := lipgloss.NewStyle().Background(th.Mantle).Foreground(th.Subtle)
@@ -617,6 +729,10 @@ func (m Model) statusBar() string {
 	if title == "" {
 		title = "stdin"
 	}
+	if ansi.StringWidth(title) > max(12, m.termW/2) {
+		title = filepath.Base(title)
+	}
+	title = ansi.Truncate(title, max(1, m.termW/3), "…")
 	left := name.Render(title)
 	if m.notice != "" {
 		left += bar.Render(" " + m.notice)
@@ -635,6 +751,7 @@ func (m Model) statusBar() string {
 	pct := fmt.Sprintf(" %3.0f%% ", m.vp.ScrollPercent()*100)
 	right := dim.Render(hint) + bar.Bold(true).Render(pct)
 
+	left = ansi.Truncate(left, max(1, m.termW-8), "…")
 	gap := m.termW - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		right = bar.Bold(true).Render(pct)

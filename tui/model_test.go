@@ -123,7 +123,7 @@ func TestCloseButtonAndRelativeLinkFromChild(t *testing.T) {
 		t.Fatalf("close button did not pop: stack=%d path=%q", len(m.stack), m.cur.path)
 	}
 	// Clicking elsewhere on the header does nothing.
-	m = click(m, 2, 0)
+	m = click(m, m.termW-closeW-1, 0)
 	if len(m.stack) != 1 {
 		t.Fatal("header click outside ✕ should be inert")
 	}

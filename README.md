@@ -8,7 +8,8 @@ output when piped.
 - Clickable links: follow `.md` links in place, jump to `#headings`, open URLs in the browser
 - Search, mouse selection with copy, live reload while you edit
 - Catppuccin Mocha and Latte themes; 2x headings on kitty
-- No config files, no daemon, no JavaScript — one static binary
+- Core Markdown rendering is a single Go binary; optional Mermaid diagrams use a local Node/browser renderer
+- Inline Mermaid diagrams in Kitty, with zoom, pan, and source copy/search
 
 ```
 mdview README.md            # interactive pager
@@ -20,8 +21,9 @@ mdview -color always x.md | less -R
 
 ## Install
 
-**Requires Go 1.27 or newer** ([download](https://go.dev/dl/)). No other
-dependencies.
+**Building requires Go 1.27 or newer** ([download](https://go.dev/dl/)).
+Ordinary Markdown rendering needs no external renderer. Mermaid graphics use
+the optional dependencies below; opening links and copying may use desktop tools.
 
 ### One-liner
 
@@ -93,7 +95,9 @@ languages), GFM tables with alignment, thematic breaks, raw HTML (dimmed).
 | `tab` / `shift+tab` | focus next / previous link (shows its destination) |
 | `enter`        | follow the focused link |
 | `y`            | copy the selection    |
-| `esc`, `backspace`, click `✕` | clear focus/selection, then back to the previous document |
+| `esc`, `backspace` | clear focus/selection, then back one document |
+| Click `✕` | back one document |
+| Click an earlier breadcrumb | return directly to that document |
 | `q`            | quit (`esc` also quits at the root) |
 
 Mouse: hover a link for a tooltip with its destination, click to follow it,
@@ -110,7 +114,17 @@ live preview beside your editor.
 Destinations are not printed inline in the pager; hover or focus a link to
 see them (`-inline-urls` restores the old look). Left-click any link. A
 relative or `file://` path to a `.md` file opens in place, stacked on the current document — a breadcrumb bar with a `✕`
-appears at the top, and `esc` returns you to where you were. `#heading`
+appears at the top. Click any earlier document name to return directly to
+it, restoring its scroll position and saved search and discarding the later
+trail. The current document name is bold and inactive. When the trail is too
+wide, the nearest ancestors stay visible and older entries appear in a
+clickable `…` menu, ordered oldest to newest. Use the mouse or
+`↑`/`↓` (`k`/`j`, `tab`/`shift+tab`) and `enter` to select; `esc` dismisses
+the menu. Long menus scroll with the wheel or keyboard.
+
+Click `✕` to go back one document, or use `esc`/`backspace` (which first
+clear active focus or selection). Returning to the original document hides
+the breadcrumb bar. `#heading`
 anchors (GitHub-style slugs) scroll to the heading, including
 `other.md#section`. Anything else — `http(s)`, `mailto:`, images, non-markdown
 files — is handed to `xdg-open`. Absolute URLs are also emitted as OSC 8
@@ -125,6 +139,7 @@ are not clickable (the table layout decides their final position).
 -theme NAME    mocha|dark (default) or latte|light
 -pager MODE    auto|always|never
 -color MODE    auto|always|never
+-mermaid MODE  auto|off (default auto; graphics only in a supported Kitty pager)
 -no-urls       hide link/image destinations in printed output
 -inline-urls   show destinations inline in the pager too (default: tooltips)
 -big-headings  auto|on|off — scale H1/H2/H3 to 2x/1.5x/1.25x using kitty's
@@ -136,16 +151,96 @@ Big headings work in kitty ≥ 0.40 only; other terminals get bold, coloured
 `auto` stays off there — pass `-big-headings on` only on a terminal that
 supports OSC 66.
 
+## Mermaid diagrams
+
+Fenced `mermaid` blocks render asynchronously as inline images in a direct
+[Kitty](https://sw.kovidgoyal.net/kitty/) session, version **0.28 or newer**.
+Inline diagrams retain their natural size (accounting for the 2× PNG density)
+and shrink when needed to fit the document width; narrow charts are not
+stretched across the terminal. Tall diagrams still scroll with the document.
+Click an image or use `tab` to focus its caption and `enter` to open the
+full-screen diagram viewer. The document position and keyboard focus return
+when the viewer closes; viewing diagrams does not add breadcrumbs.
+
+| Viewer input | Action |
+| --- | --- |
+| `+` / `-` (or mouse wheel) | Zoom by 1.25, from 25% to 800% of the fitted size |
+| Arrows or `h/j/k/l` | Pan |
+| Left-button drag | Pan |
+| `0` | Reset to fit the whole diagram |
+| `y` | Copy Mermaid source |
+| `esc` or `q` | Return to the document |
+| `ctrl+c` | Quit mdview |
+
+Right-click a diagram for **Copy Mermaid source**. Search (`/`) matches its
+retained source and scrolls to the diagram. Selecting diagram rows copies the
+source once, without image placeholders. Rendered diagrams are images: links
+inside them are **not independently clickable**.
+
+### Optional renderer installation
+
+Install Node.js **22.12 or newer** (required by the Puppeteer version used in
+verification), npm, the official
+[Mermaid CLI](https://github.com/mermaid-js/mermaid-cli), and its Chromium
+browser. The initially tested CLI version is pinned to **11.17.0**:
+
+```sh
+npm install --prefix "$HOME/.local/share/mdview/mermaid" \
+  @mermaid-js/mermaid-cli@11.17.0 puppeteer@25.11.0
+# If npm skipped Puppeteer's install script, explicitly install its browser:
+node "$HOME/.local/share/mdview/mermaid/node_modules/puppeteer/install.mjs"
+export PATH="$HOME/.local/share/mdview/mermaid/node_modules/.bin:$PATH"
+mmdc --version
+```
+
+Puppeteer's normal install downloads a compatible Chrome for Testing; that browser also
+needs the system libraries documented by
+[Puppeteer](https://pptr.dev/troubleshooting). Alternatively, use an installed
+Chromium browser:
+
+```sh
+export PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+```
+
+Ensure `mmdc` and `node` are on the pager's `PATH`. Test that the browser works:
+
+```sh
+printf 'flowchart LR\n A --> B\n' > /tmp/diagram.mmd
+mmdc -i /tmp/diagram.mmd -o /tmp/diagram.png -w 1600 -s 2
+mdview testdata/mermaid.md
+```
+
+mdview never downloads dependencies while viewing a document. It uses a
+1600-pixel browser viewport at scale 2, with Mocha/Latte colors and an opaque
+matching background. At most two render jobs run concurrently, each with a
+30-second timeout. Completed diagrams are cached for the session by source,
+theme, renderer version, and settings, with a **128 MiB** budget accounting
+for PNG bytes and decoded pixel size. Unused entries are evicted; diagrams
+that cannot fit the budget or Kitty’s 10,000-pixel per-dimension limit remain as source. Resizing and zooming reuse the
+PNG. Document changes cancel obsolete jobs; exit cleans up subprocesses,
+temporary files, and owned terminal images.
+
+The original code block stays visible during rendering, and silently remains
+if Kitty, `mmdc`, or its browser is unavailable, capability detection fails,
+or rendering errors or times out. Piped output, `-pager never`, other
+terminals, and tmux/screen always retain code blocks. `-mermaid off` disables
+graphics explicitly.
+
 ## Development
 
 ```sh
 go build -o mdview .   # build
 go test ./...          # run the test suite
+go test -race ./...
+MDVIEW_TEST_MMDC=1 go test ./mermaid -run TestRealCLI -v # optional real browser checks
 go vet ./...
 ```
 
 `testdata/sample.md` exercises every construct the renderer supports —
 `mdview testdata/sample.md` is a quick visual smoke test.
+
+The Mermaid verification record and real Kitty screenshots are in
+[docs/mermaid-verification.md](docs/mermaid-verification.md).
 
 ## How it works
 
@@ -159,7 +254,12 @@ theme's Chroma style. Tables use `lipgloss/table` for column sizing.
 
 `tui/` is a [Bubble Tea](https://github.com/charmbracelet/bubbletea)
 viewport with a status bar, search over ANSI-stripped lines, and an mtime
-poll for live reload. Themes live in `render/theme.go`.
+poll for live reload. `mermaid/` owns cancellable renderer jobs and the bounded
+session cache. `graphics/` verifies Kitty support and inserts streamed PNG
+uploads and virtual placements into the same output writes as terminal frames.
+Every placeholder cell carries its image, placement, row, and column identity,
+so scrolling, panning, and overlays can clip images. Themes live in
+`render/theme.go`.
 
 ## License
 

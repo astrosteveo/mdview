@@ -192,7 +192,20 @@ func (m Model) selectedText() string {
 	}
 	a, b := m.sel.ordered()
 	var out []string
+	copiedBlocks := map[int]bool{}
 	for i := a.line; i <= b.line && i < len(m.plain); i++ {
+		if i < len(m.rendered.Lines) {
+			l := m.rendered.Lines[i]
+			if l.Mermaid != nil {
+				if _, ok := m.diagrams[l.Mermaid.ID]; ok {
+					if !copiedBlocks[l.Mermaid.ID] {
+						out = append(out, l.Mermaid.Source)
+						copiedBlocks[l.Mermaid.ID] = true
+					}
+					continue
+				}
+			}
+		}
 		s := m.lineScale(i)
 		text := m.plain[i]
 		from, to := 0, ansi.StringWidth(text)
@@ -237,7 +250,9 @@ func (m *Model) copyText(text string) {
 func (m *Model) openMenu(x, y int) {
 	var items []menuItem
 	if p, ok := m.hit(x, y); ok {
-		if ref, ok := m.linkAt(p); ok {
+		if d, ok := m.diagramAt(p); ok {
+			items = append(items, menuItem{"Open diagram", func(m *Model) tea.Cmd { m.openDiagram(d.block.ID); return nil }}, menuItem{"Copy Mermaid source", func(m *Model) tea.Cmd { m.copyText(d.block.Source); return nil }})
+		} else if ref, ok := m.linkAt(p); ok {
 			dest := ref.link.Dest
 			items = append(items,
 				menuItem{"Open link", func(m *Model) tea.Cmd { m.follow(dest); return nil }},
@@ -267,41 +282,67 @@ func (m *Model) openMenu(x, y int) {
 
 func (m *Model) closeMenu() { m.menu = nil }
 
-// menuBox renders the menu and returns its rows plus its clamped origin.
+// menuWindow keeps the selected entry visible, even in a one-row terminal.
+func (m Model) menuWindow() (start, count, border int) {
+	if m.termH >= 3 && m.termW >= 4 {
+		border = 1
+	}
+	count = min(len(m.menu.items), max(m.termH-2*border, 0))
+	start = max(0, m.menu.idx-count+1)
+	start = min(start, len(m.menu.items)-count)
+	return
+}
+
+// menuBox renders only the visible entries and clamps the entire box.
 func (m Model) menuBox() (rows []string, x, y int) {
 	th := m.renderer.Theme()
+	start, count, edge := m.menuWindow()
 	w := 0
 	for _, it := range m.menu.items {
 		w = max(w, ansi.StringWidth(it.label))
 	}
-	item := lipgloss.NewStyle().Background(th.Surface0).Foreground(th.Text).Width(w+2).Padding(0, 1)
+	padding := 2 * edge
+	w = min(w, max(m.termW-2*edge-padding, 0))
+	item := lipgloss.NewStyle().Background(th.Surface0).Foreground(th.Text)
 	cur := item.Background(th.Accent).Foreground(th.Mantle).Bold(true)
-	border := lipgloss.NewStyle().Foreground(th.Muted).Background(th.Surface0)
-	top := border.Render("╭" + strings.Repeat("─", w+2) + "╮")
-	bot := border.Render("╰" + strings.Repeat("─", w+2) + "╯")
-	rows = append(rows, top)
-	for i, it := range m.menu.items {
+	border := item.Foreground(th.Muted)
+	if edge > 0 {
+		rows = append(rows, border.Render("╭"+strings.Repeat("─", w+padding)+"╮"))
+	}
+	for i := start; i < start+count; i++ {
 		sty := item
 		if i == m.menu.idx {
 			sty = cur
 		}
-		rows = append(rows, border.Render("│")+sty.Render(it.label)+border.Render("│"))
+		label := padTo(ansi.Truncate(m.menu.items[i].label, w, "…"), w)
+		if edge > 0 {
+			label = " " + label + " "
+		}
+		row := sty.Render(label)
+		if edge > 0 {
+			row = border.Render("│") + row + border.Render("│")
+		}
+		rows = append(rows, row)
 	}
-	rows = append(rows, bot)
-	x = min(m.menu.x, max(m.termW-(w+4), 0))
-	y = min(m.menu.y, max(m.termH-len(rows), 0))
-	return rows, x, y
+	if edge > 0 {
+		rows = append(rows, border.Render("╰"+strings.Repeat("─", w+padding)+"╯"))
+	}
+	x = max(0, min(m.menu.x, m.termW-(w+padding+2*edge)))
+	y = max(0, min(m.menu.y, m.termH-len(rows)))
+	return
 }
 
-// menuHit returns the item index under terminal cell (x, y), or -1.
 func (m Model) menuHit(x, y int) int {
 	rows, mx, my := m.menuBox()
-	w := ansi.StringWidth(rows[0])
-	i := y - my - 1
-	if x < mx || x >= mx+w || i < 0 || i >= len(m.menu.items) {
+	if len(rows) == 0 {
 		return -1
 	}
-	return i
+	start, count, edge := m.menuWindow()
+	i := y - my - edge
+	if x < mx+edge || x >= mx+ansi.StringWidth(rows[0])-edge || i < 0 || i >= count {
+		return -1
+	}
+	return start + i
 }
 
 func (m *Model) runMenuItem(i int) tea.Cmd {
@@ -353,6 +394,12 @@ func (m Model) tooltip(ref linkRef) (box string, x, y int, ok bool) {
 func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	if m.menu != nil {
 		switch {
+		case msg.Button == tea.MouseButtonWheelDown:
+			m.menu.idx = min(m.menu.idx+1, len(m.menu.items)-1)
+			return m, nil
+		case msg.Button == tea.MouseButtonWheelUp:
+			m.menu.idx = max(m.menu.idx-1, 0)
+			return m, nil
 		case msg.Action == tea.MouseActionMotion:
 			if i := m.menuHit(msg.X, msg.Y); i >= 0 {
 				m.menu.idx = i
@@ -380,9 +427,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		m.notice = ""
 		m.focus = -1
 		if m.headerH() > 0 && msg.Y == 0 {
-			if msg.X >= m.termW-closeW {
-				m.pop()
-			}
+			m.clearSelection()
+			m.clickBreadcrumb(msg.X)
 			return m, nil
 		}
 		p, ok := m.hit(msg.X, msg.Y)
@@ -416,7 +462,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		// A plain click: follow a link, otherwise just drop any selection.
 		anchor := m.sel.a
 		m.clearSelection()
-		if ref, ok := m.linkAt(anchor); ok {
+		if d, ok := m.diagramAt(anchor); ok {
+			m.openDiagram(d.block.ID)
+		} else if ref, ok := m.linkAt(anchor); ok {
 			m.follow(ref.link.Dest)
 		}
 		return m, nil

@@ -14,20 +14,23 @@ import (
 	"github.com/muesli/termenv"
 	"golang.org/x/term"
 
+	"github.com/astrosteveo/mdview/graphics"
+	"github.com/astrosteveo/mdview/mermaid"
 	"github.com/astrosteveo/mdview/render"
 	"github.com/astrosteveo/mdview/tui"
 )
 
 func main() {
 	var (
-		width  = flag.Int("w", 0, "content width (0 = terminal width, capped at -max)")
-		maxW   = flag.Int("max", 0, "maximum content width in the pager (0 = full terminal width)")
-		theme  = flag.String("theme", "mocha", "colour theme: mocha|dark, latte|light")
-		pager  = flag.String("pager", "auto", "use the interactive pager: auto|always|never")
-		color  = flag.String("color", "auto", "colour output: auto|always|never")
-		noURLs = flag.Bool("no-urls", false, "hide link and image destinations in printed output")
-		inline = flag.Bool("inline-urls", false, "show destinations inline in the pager too (they are tooltips by default)")
-		bigH   = flag.String("big-headings", "auto", "scale H1–H3 with kitty's text sizing protocol: auto|on|off")
+		width    = flag.Int("w", 0, "content width (0 = terminal width, capped at -max)")
+		maxW     = flag.Int("max", 0, "maximum content width in the pager (0 = full terminal width)")
+		theme    = flag.String("theme", "mocha", "colour theme: mocha|dark, latte|light")
+		pager    = flag.String("pager", "auto", "use the interactive pager: auto|always|never")
+		color    = flag.String("color", "auto", "colour output: auto|always|never")
+		noURLs   = flag.Bool("no-urls", false, "hide link and image destinations in printed output")
+		inline   = flag.Bool("inline-urls", false, "show destinations inline in the pager too (they are tooltips by default)")
+		diagrams = flag.String("mermaid", "auto", "inline Mermaid diagrams in Kitty: auto|off")
+		bigH     = flag.String("big-headings", "auto", "scale H1–H3 with kitty's text sizing protocol: auto|on|off")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: mdview [flags] [FILE|-]\n\n")
@@ -35,6 +38,9 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if *diagrams != "auto" && *diagrams != "off" {
+		fatalf("unknown --mermaid %q (try auto or off)", *diagrams)
+	}
 
 	th, ok := render.ByName(*theme)
 	if !ok {
@@ -103,21 +109,40 @@ func main() {
 		maxWidth = *width
 	}
 	r.NoURLs = !*inline // the pager shows destinations as tooltips instead
+	if err := runPager(path, src, r, maxWidth, *diagrams); err != nil {
+		fatalf("%v", err)
+	}
+}
+
+func runPager(path string, src []byte, r *render.Renderer, maxWidth int, diagrams string) error {
 	m := tui.New(path, src, r, maxWidth)
 
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithMouseAllMotion()}
+	if diagrams == "auto" && graphics.Eligible() {
+		if cli, err := mermaid.Discover(); err == nil {
+			if cap, ok := graphics.Probe(); ok {
+				session := mermaid.New(cli.Render, cli.Version, r.Theme().Name)
+				defer session.Close()
+				writer := graphics.NewWriter(os.Stdout)
+				defer writer.Close()
+				m.EnableMermaid(session, writer, cap)
+				opts = append(opts, tea.WithOutput(writer))
+			}
+		}
+	}
 	if path == "" {
 		// stdin held the document; take keystrokes from the controlling tty.
 		tty, err := os.Open("/dev/tty")
 		if err != nil {
-			fatalf("cannot open /dev/tty for input: %v", err)
+			return fmt.Errorf("cannot open /dev/tty for input: %w", err)
 		}
 		defer tty.Close()
 		opts = append(opts, tea.WithInput(tty))
 	}
 	if _, err := tea.NewProgram(m, opts...).Run(); err != nil {
-		fatalf("%v", err)
+		return err
 	}
+	return nil
 }
 
 // readInput returns the file path (empty for stdin) and its contents.

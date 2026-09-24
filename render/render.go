@@ -33,6 +33,7 @@ type Renderer struct {
 	src        []byte
 	styleCache map[attrs]lipgloss.Style
 
+	mermaidID    int
 	quoteDepth   int
 	listDepth    int
 	skipCheckbox bool
@@ -57,9 +58,17 @@ func (r *Renderer) RenderDoc(src []byte, width int) Doc {
 		width = 20
 	}
 	r.src = src
+	r.mermaidID = 0
 	r.quoteDepth, r.listDepth, r.skipCheckbox = 0, 0, false
 	root := md.Parser().Parse(text.NewReader(src))
 	lines := r.blocks(root, width, false)
+	base := 0
+	for i := range lines {
+		if lines[i].Mermaid == nil || i == 0 || lines[i-1].Mermaid != lines[i].Mermaid {
+			base = i
+		}
+		lines[i].BaseRow = base
+	}
 	return Doc{Lines: lines, Anchors: collectAnchors(lines)}
 }
 
@@ -91,7 +100,16 @@ func (r *Renderer) block(n ast.Node, width int, tight bool) []Line {
 	case *ast.List:
 		return r.list(v, width)
 	case *ast.FencedCodeBlock:
-		return r.codeBlock(string(v.Language(r.src)), r.linesOf(v), width)
+		lang, source := string(v.Language(r.src)), r.linesOf(v)
+		lines := r.codeBlock(lang, source, width)
+		if strings.EqualFold(lang, "mermaid") {
+			r.mermaidID++
+			block := &MermaidBlock{ID: r.mermaidID, Source: source, Width: width}
+			for i := range lines {
+				lines[i].Mermaid = block
+			}
+		}
+		return lines
 	case *ast.CodeBlock:
 		return r.codeBlock("", r.linesOf(v), width)
 	case *ast.HTMLBlock:

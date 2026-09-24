@@ -7,7 +7,19 @@ import (
 )
 
 // Line is one rendered row: styled text plus the clickable ranges in it.
+type MermaidBlock struct {
+	ID     int
+	Source string
+	Width  int
+}
+
 type Line struct {
+	Mermaid  *MermaidBlock
+	Indent   int // container prefix in terminal cells
+	BaseRow  int // original rendered row, used to preserve scroll
+	ImageRow int
+	Image    bool // image placeholder row; never text for copy/search
+
 	Text   string
 	Links  []Link
 	Anchor string // heading slug, set on a heading's first line
@@ -71,6 +83,7 @@ func (l Line) shift(w int) Line {
 
 // prefix prepends p (of cell width w) to the line text.
 func (l Line) prefix(p string, w int) Line {
+	l.Indent += w
 	l = l.shift(w)
 	l.Text = p + l.Text
 	return l
